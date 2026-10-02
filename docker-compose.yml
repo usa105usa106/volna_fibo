@@ -1,0 +1,11 @@
+services:
+  senior-wave-bot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - senior_wave_data:/data
+
+volumes:
+  senior_wave_data:
