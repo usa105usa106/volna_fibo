@@ -1,58 +1,51 @@
-# Senior-wave methodology used by v0010
+# Senior-wave methodology used by v0011
 
-The bot is deliberately restricted to senior structure.
+## Structural hierarchy
 
-- Senior hierarchy: 1D -> COMPLETE4H.
-- COMPLETE4H is built only from exactly four CLOSED 1H candles on UTC buckets 00/04/08/12/16/20.
-- 1m/5m/15m/1H never create new Elliott labels.
-- Search targets only global W2 and senior nested W3-(2).
-- Deep W2/W3-(2) is desirable while strict origin remains intact.
-- A wick below strict origin invalidates the old count immediately, even inside an incomplete 4H bucket.
-- A new lower COMPLETE4H low above strict origin may re-anchor the working W2/W3-(2).
-- Re-anchor recalculates depth, Fib state, entry zones and senior targets.
-- Old targets are never retained after strict invalidation.
-- Fib structural confirmation is evaluated by COMPLETE4H close/acceptance, not by a random intrabar reclaim.
-- Rating is opportunity/convexity, not “coin quality”.
+- 1D identifies senior impulse/origin context.
+- COMPLETE4H is built only from exactly four closed 1H candles.
+- New senior anchors/re-anchors come only from COMPLETE4H.
+- Intrabar 1H data may immediately invalidate a count if strict origin is wicked through.
+- No 1m/5m/15m/1H move creates a new global Elliott label.
 
-## Deterministic discovery heuristic
+## Setups
 
-The migration state specifies how a senior count must be maintained but does not give a fully mechanical definition of a brand-new “clear senior W1”. v0010 keeps that engineering layer explicit:
+The production detector searches only:
 
-1. Find local 1D pivots with a 3-day window.
-2. A global W1 candidate must rise at least 18% and at least 3x daily ATR from a daily pivot low to a later daily pivot high.
-3. A candidate W2 must retrace 50%–99.5% of W1 while remaining strictly above W1 origin.
-4. A W1 high older than the available COMPLETE4H history is not eligible; the bot will not infer the correction from a truncated 4H tail.
-   The daily timestamp denotes candle open. The matching high is located in COMPLETE4H within that daily candle; W2 lows must occur in later COMPLETE4H buckets. This corrects chronology without changing the pivot or retracement thresholds.
-5. Nested W3-(1) is identified only after W2 and must advance at least 10%; W3-(2) must then retrace 50%–97% while staying above W2.
-6. If a valid W3-(2) exists, it is preferred over the parent W2 for that asset row.
+- global W2 after a senior W1;
+- nested W3-(2) after W2 → W3-(1).
 
-These thresholds are isolated in `DetectorConfig` so they can be validated without changing the strict-origin doctrine.
+Deep strict-valid corrections are preferred, but depth never overrides strict-origin validity. INVALID/RECOUNT states drop obsolete Fib/targets/zones.
 
-## Fib and targets
+## Fresh Search
 
-Retracement prices are calculated from the relevant impulse origin/high. The migrated nested DOGE impulse `0.07831 -> 0.10589` gives `.500 = 0.09210`, `.382 = 0.09535444`, `.236 = 0.09938112`.
+Search has no candle/parquet cache. Each run downloads the configured full exchange history and reconstructs the senior map from scratch. Only the successfully delivered Search is atomically installed as the new accompaniment set.
 
-Senior projection targets use `working_low + {1.0, 1.618, 2.618, 4.236} * impulse_length`.
+Top-N excludes stable/pegged assets, exact leveraged products, XAU/USOIL controls, and the duplicate commodity symbols XAUT/UKOIL.
 
-For a fresh global W2, the same projection multipliers are applied to W1 length. This remains an explicit engineering rule because the migration note did not define a separate mechanical global-W2 target formula.
+## XAU / USOIL
 
-## Entry-zone automation
+XAU and USOIL are permanent separate controls outside the crypto TOP-10 and come only from the currently selected exchange. Absence/unavailability skips that control without breaking crypto discovery.
 
-The migration state contains hand-maintained base/deep zones but no universal generation formula. v0010 therefore uses:
+## Reporting
 
-- `База — лимитка`: .786–.886 retracement band.
-- `На вынос — лимитка`: .886–.950 band, clipped above strict origin.
+The trading methodology is unchanged by v0011. Only presentation changes:
 
-## Fresh-data and integrity policy
-
-Search and manual ticker analysis never reuse candle files or downloaded OHLC history. Tracking stores only senior state and downloads current market history fresh.
-
-Before detection, OHLC histories pass integrity checks for timestamps, duplicates, OHLC validity, continuity and freshness. A broken crypto series is excluded from Search rather than silently generating a senior count.
-
-XAU/USOIL are sourced only from the currently selected exchange. If unavailable there, no substitute market is used.
+- main table → PNG with true vertical columns;
+- full diagnostic state → attached UTF-8 `.txt`;
+- caption → analysis duration, scope/errors and best current crypto setups.
 
 ## /walk methodology
 
-`/walk` is isolated from production Search/Accompaniment state. It uses historical checkpoints and slices the downloaded data at each checkpoint so the detector cannot see later candles. For each qualifying historical signal it observes the next configured horizon and records which event occurred first: T1, strict-origin invalidation, neither, or both within one 1H candle (ambiguous ordering).
+`/walk` is isolated from Search/Accompaniment state. It is a no-look-ahead diagnostic over a fixed liquid set:
 
-The diagnostic uses the current Top-N membership as its universe. It is intended to detect obvious detector/rating weaknesses, not to claim a bias-free historical portfolio backtest.
+`BTC, ETH, SOL, BNB, XRP, DOGE, ADA, LINK, LTC, BCH`.
+
+For each configured historical checkpoint the detector sees only candles that had closed by that checkpoint. If a qualifying W2/W3-(2) exists, later 1H candles within the configured horizon are used only to classify the outcome:
+
+- T1 first;
+- strict invalidation first;
+- unresolved;
+- T1 and strict invalidation in the same 1H candle (ordering ambiguous).
+
+The report records MFE/MAE, rating bucket, wave type and the exact state values needed to inspect detector errors. `/walk` writes no candle cache and changes no production session/timer.

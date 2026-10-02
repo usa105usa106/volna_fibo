@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-LABEL org.opencontainers.image.version="0010"
+LABEL org.opencontainers.image.version="0011"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
@@ -8,14 +8,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt requirements.lock.txt ./
 RUN pip install --no-cache-dir -r requirements.lock.txt
 
 COPY *.py ./
-COPY METHODOLOGY.md README.md CHANGELOG_v0010.md AUDIT_v0010.md ./
+COPY METHODOLOGY.md README.md CHANGELOG_v0011.md AUDIT_v0011.md ./
 
 RUN mkdir -p /data
 

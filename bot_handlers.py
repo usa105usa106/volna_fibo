@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import os
 import re
 import time
@@ -14,13 +15,20 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramForbiddenError, TelegramNetworkError, TelegramRetryAfter, TelegramServerError
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import BufferedInputFile, Message
 
 from bot_keyboards import clean_button, keyboard
 from core_toggles import EXCHANGE_LABELS, INTERVAL_LABELS, next_exchange, next_interval_minutes, next_top_n
 from config import Settings
 from db_repository import Repository
-from services_formatter import split_plain, telegram_table_messages
+from services_formatter import (
+    _fmt,
+    render_table_png,
+    safe_report_filename,
+    split_plain,
+    technical_report_text,
+    telegram_table_messages,
+)
 from services_scanner import RunResult, ScannerService, WalkForwardResult
 from services_scheduler import DynamicScheduler
 from services_runtime import cleanup_runtime_files
@@ -39,7 +47,7 @@ class BotController:
         self.router = Router()
         self.started = time.monotonic()
         self.cooldowns: dict[int, float] = {}
-        # No Telegram account whitelist in v0010. Any chat that talks to the bot can use it
+        # No Telegram account whitelist in v0011. Any chat that talks to the bot can use it
         # and becomes a persisted destination for periodic reports.
         self.report_chats: set[int] = set()
         self.scheduler: DynamicScheduler | None = None
@@ -332,7 +340,13 @@ class BotController:
             await self.run_manual_and_report(symbols or [], message.chat.id)
         else:
             settings = await self.repo.get_settings()
-            await self._answer(message, f"🧪 /walk запущен: {EXCHANGE_LABELS[settings.exchange]} · текущий Top-{settings.top_n}.\nПоиск/Сопровождение и их таймер не меняются.", reply_markup=await self._kbd())
+            await self._answer(
+                message,
+                f"🧪 /walk запущен: {EXCHANGE_LABELS[settings.exchange]} · 10 majors: "
+                "BTC, ETH, SOL, BNB, XRP, DOGE, ADA, LINK, LTC, BCH.\n"
+                "Поиск/Сопровождение и их таймер не меняются.",
+                reply_markup=await self._kbd(),
+            )
             await self.run_walk_and_report(message.chat.id)
 
     async def run_manual_and_report(self, symbols: list[str], chat_id: int):
@@ -346,7 +360,23 @@ class BotController:
     async def run_walk_and_report(self, chat_id: int):
         try:
             result = await self.scanner.walk_forward()
-            await self._send_message(chat_id, self._format_walk(result), reply_markup=await self._kbd())
+            report = self._format_walk_txt(result)
+            stamp = datetime.now(ZoneInfo(self.cfg.bot_timezone)).strftime("%Y%m%d_%H%M%S")
+            filename = safe_report_filename("walk_10majors", stamp)
+            caption = (
+                f"🧪 /walk готов за {self._format_duration(result.analysis_seconds)}. "
+                f"10 majors: {result.assets_tested}/{result.assets_requested} · ошибок: {result.data_errors}. "
+                "Файл — полный материал для полировки детектора."
+            )
+            if not self.bot:
+                return
+            await self._tg_call(
+                self.bot.send_document,
+                chat_id,
+                BufferedInputFile(report.encode("utf-8"), filename=filename),
+                caption=caption,
+                reply_markup=await self._kbd(),
+            )
         except Exception:
             log.exception("Walk analysis/report failed")
             await self._notify_failure(chat_id, "/walk завершился ошибкой.")
@@ -402,6 +432,66 @@ class BotController:
             # Do not wake our own scheduler on failure: it must apply retry backoff.
             self._running = False
 
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        total = max(0, int(round(seconds)))
+        minutes, secs = divmod(total, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours} ч. {minutes} мин. {secs} сек."
+        return f"{minutes} мин. {secs} сек."
+
+    @staticmethod
+    def _best_coins(result: RunResult, limit: int = 3) -> str:
+        valid = [
+            state for state in result.states
+            if not state.is_control
+            and state.rating is not None
+            and state.status not in {"INVALID", "RECOUNT", "NO_SETUP", "DATA_INCOMPLETE"}
+        ]
+        valid.sort(key=lambda state: state.rating or 0.0, reverse=True)
+        if not valid:
+            return "нет валидных senior-сетапов"
+        return ", ".join(f"{state.symbol.replace('_USDT', '').removesuffix('USDT')} ({state.rating:.1f})" for state in valid[:limit])
+
+    def _short_summary(self, result: RunResult) -> str:
+        duration = self._format_duration(result.analysis_seconds)
+        errors = len(result.errors)
+        best = self._best_coins(result)
+        if result.mode == "search":
+            scope = f"Top-{result.top_n}"
+        elif result.mode == "track":
+            scope = f"сопровождение {result.found_crypto} crypto"
+        else:
+            scope = f"тикеров {result.checked}"
+        return (
+            f"Анализ занял {duration} · {scope} / ошибок: {errors}.\n"
+            f"Кратко: лучшие монеты — {best}."
+        )
+
+    def _report_titles(self, result: RunResult) -> tuple[str, str, str]:
+        exchange_title = EXCHANGE_LABELS.get(result.exchange, result.exchange)
+        if result.mode == "search":
+            return "ПОИСК W2 / W3-(2)", f"{exchange_title} · Top-{result.top_n}", "TOP-10 CRYPTO"
+        if result.mode == "track":
+            return "СОПРОВОЖДЕНИЕ", f"{exchange_title} · набор последнего поиска", "CRYPTO ИЗ ПОСЛЕДНЕГО ПОИСКА"
+        requested = ", ".join(result.requested_symbols or [])
+        return "РУЧНОЙ SENIOR-АНАЛИЗ", f"{exchange_title} · {requested}", "ЗАПРОШЕННЫЕ CRYPTO"
+
+    def _technical_txt(self, result: RunResult, title: str, subtitle: str) -> str:
+        return technical_report_text(
+            result.states,
+            heading=[
+                f"SENIOR WAVE BOT v{self.cfg.bot_version}",
+                title,
+                subtitle,
+                f"Анализ: {self._format_duration(result.analysis_seconds)}",
+                f"Проверено: {result.checked}; crypto в выдаче: {result.found_crypto}; ошибок: {len(result.errors)}",
+            ],
+            errors=result.errors,
+            skipped_controls=result.skipped_controls,
+        )
+
     async def _report(self, result: RunResult, chat_id: int | None) -> bool:
         if not self.bot:
             return False
@@ -413,48 +503,49 @@ class BotController:
                 await self._send_message(cid, "Сопровождать нечего: сначала запусти Поиск.", reply_markup=await self._kbd())
             return False
 
-        exchange_title = EXCHANGE_LABELS.get(result.exchange, result.exchange)
-        controls_note = ""
-        if result.skipped_controls:
-            controls_note = "\nПропущены (нет на выбранной бирже): " + ", ".join(result.skipped_controls)
+        title, subtitle, crypto_label = self._report_titles(result)
+        short_summary = self._short_summary(result)
+        technical = self._technical_txt(result, title, subtitle)
+        stamp = datetime.now(ZoneInfo(self.cfg.bot_timezone)).strftime("%Y%m%d_%H%M%S")
+        txt_name = safe_report_filename(result.mode, stamp)
 
-        if result.mode == "search":
-            summary = (
-                "🔍 ПОИСК W2/W3-(2)\n"
-                f"{exchange_title} · Top-{result.top_n} crypto · XAU/USOIL только с этой биржи\n"
-                f"Свежих crypto-историй проверено: {result.successful_crypto_snapshots} · в TOP-10: {result.found_crypto}"
-                f"{controls_note}"
+        image_bytes: bytes | None = None
+        try:
+            image_bytes = await asyncio.to_thread(
+                render_table_png,
+                result.states,
+                title=title,
+                subtitle=subtitle,
+                crypto_label=crypto_label,
+                version=self.cfg.bot_version,
             )
-            crypto_label = "🔥 TOP-10 CRYPTO"
-        elif result.mode == "track":
-            summary = (
-                "📈 СОПРОВОЖДЕНИЕ\n"
-                f"{exchange_title} · набор последнего успешного поиска\n"
-                f"Проверено: {result.checked} · crypto: {result.found_crypto}"
-                f"{controls_note}"
-            )
-            crypto_label = "📈 CRYPTO ИЗ ПОСЛЕДНЕГО ПОИСКА"
-        else:
-            requested = ", ".join(result.requested_symbols or [])
-            summary = (
-                "🔎 РУЧНОЙ АНАЛИЗ\n"
-                f"{exchange_title} · только: {requested}\n"
-                f"Проверено: {result.checked}"
-            )
-            crypto_label = "🔎 ЗАПРОШЕННЫЕ CRYPTO"
+        except Exception:
+            # Rendering must never destroy a valid Search. Text fallback remains available.
+            log.exception("PNG table rendering failed; using Telegram text fallback")
 
-        if result.errors:
-            summary += f" · ошибок/неполных данных: {len(result.errors)}"
-        table_msgs = telegram_table_messages(result.states, summary, crypto_label=crypto_label)
+        fallback_title = f"{title}\n{subtitle}"
+        fallback_msgs = telegram_table_messages(result.states, fallback_title, crypto_label=crypto_label)
         complete_chats = 0
         transient_failure = False
         for cid in targets:
             try:
-                for i, text in enumerate(table_msgs):
-                    await self._send_message(
-                        cid, text, parse_mode=ParseMode.HTML,
-                        reply_markup=(await self._kbd()) if i == len(table_msgs) - 1 else None,
+                if image_bytes is not None:
+                    await self._tg_call(
+                        self.bot.send_photo,
+                        cid,
+                        BufferedInputFile(image_bytes, filename=f"{result.mode}_{stamp}.png"),
                     )
+                else:
+                    for text in fallback_msgs:
+                        await self._send_message(cid, text, parse_mode=ParseMode.HTML)
+
+                await self._tg_call(
+                    self.bot.send_document,
+                    cid,
+                    BufferedInputFile(technical.encode("utf-8"), filename=txt_name),
+                    caption=short_summary,
+                    reply_markup=await self._kbd(),
+                )
                 complete_chats += 1
             except TelegramForbiddenError:
                 log.warning("Removing unreachable report chat %s", cid)
@@ -465,35 +556,73 @@ class BotController:
                 transient_failure = True
         return complete_chats > 0 and not transient_failure
 
-    def _format_walk(self, r: WalkForwardResult) -> str:
+    def _format_walk_txt(self, r: WalkForwardResult) -> str:
         def pct(num: int, den: int) -> str:
             return "—" if den == 0 else f"{num / den * 100:.1f}%"
 
         def fnum(v: float | None) -> str:
             return "—" if v is None else f"{v:+.1f}%"
 
-        bucket_lines = []
+        lines = [
+            f"SENIOR WAVE BOT v{self.cfg.bot_version}",
+            "WALK-FORWARD — 10 LIQUID MAJORS",
+            f"Биржа: {EXCHANGE_LABELS.get(r.exchange, r.exchange)}",
+            "Монеты: BTC, ETH, SOL, BNB, XRP, DOGE, ADA, LINK, LTC, BCH",
+            f"Время анализа: {self._format_duration(r.analysis_seconds)}",
+            f"Активов: {r.assets_tested}/{r.assets_requested}; ошибок данных: {r.data_errors}",
+            f"Checkpoints: {r.checkpoints} × шаг {r.spacing_days}д; горизонт результата {r.horizon_days}д",
+            "",
+            "ИТОГ",
+            f"Сигналов >= {self.cfg.min_rating:.1f}: {r.signals}",
+            f"T1 раньше strict invalidation: {r.t1_first} ({pct(r.t1_first, r.signals)})",
+            f"Strict invalidation раньше T1: {r.invalid_first} ({pct(r.invalid_first, r.signals)})",
+            f"Не разрешились: {r.unresolved}",
+            f"T1 и invalid в одной 1H свече: {r.ambiguous}",
+            f"Median MFE: {fnum(r.median_mfe_pct)}; Median MAE: {fnum(r.median_mae_pct)}",
+            "",
+            "ПО РЕЙТИНГУ",
+        ]
         for label, (signals, t1, invalid) in r.rating_buckets.items():
-            bucket_lines.append(
-                f"{label}: сигналов {signals}, T1 первым {t1} ({pct(t1, signals)}), invalid первым {invalid} ({pct(invalid, signals)})"
+            lines.append(
+                f"{label}: signals={signals}; T1 first={t1} ({pct(t1, signals)}); "
+                f"invalid first={invalid} ({pct(invalid, signals)})"
             )
-        buckets = "\n".join(bucket_lines)
-        return (
-            "🧪 WALK-FORWARD ДЕТЕКТОРА\n\n"
-            f"Биржа: {EXCHANGE_LABELS.get(r.exchange, r.exchange)}\n"
-            f"Universe: текущий Top-{r.top_n}\n"
-            f"Активов: {r.assets_tested}/{r.assets_requested} · ошибок данных: {r.data_errors}\n"
-            f"Checkpoints: {r.checkpoints} × шаг {r.spacing_days}д · горизонт результата {r.horizon_days}д\n\n"
-            f"Сигналов ≥ {self.cfg.min_rating:.1f}: {r.signals}\n"
-            f"T1 раньше strict invalidation: {r.t1_first} ({pct(r.t1_first, r.signals)})\n"
-            f"Strict invalidation раньше T1: {r.invalid_first} ({pct(r.invalid_first, r.signals)})\n"
-            f"Не разрешились за горизонт: {r.unresolved}\n"
-            f"Оба события в одной 1H свече: {r.ambiguous}\n"
-            f"Median MFE: {fnum(r.median_mfe_pct)} · Median MAE: {fnum(r.median_mae_pct)}\n\n"
-            f"По рейтингу:\n{buckets}\n\n"
-            "Диагностика использует только данные, доступные на каждом историческом checkpoint. "
-            "Текущий Search/Tracking state не изменён."
-        )
+        lines.extend(["", "ПО ТИПУ ВОЛНЫ"] )
+        for wave, (signals, t1, invalid, rest) in r.wave_buckets.items():
+            lines.append(
+                f"{wave}: signals={signals}; T1 first={t1} ({pct(t1, signals)}); "
+                f"invalid first={invalid} ({pct(invalid, signals)}); unresolved/ambiguous={rest}"
+            )
+
+        lines.extend(["", "ПО МОНЕТАМ", "=" * 100])
+        for asset in r.assets:
+            lines.append(f"\n[{asset.symbol}]")
+            if not asset.tested:
+                lines.append(f"DATA ERROR: {asset.error or 'unknown'}")
+                continue
+            lines.append(f"Сигналов: {len(asset.signals)}")
+            if not asset.signals:
+                lines.append("Нет qualifying W2/W3-(2) на исторических checkpoints.")
+                continue
+            for idx, sig in enumerate(asset.signals, 1):
+                retrace = "—" if sig.retrace_depth is None else f"{sig.retrace_depth * 100:.2f}%"
+                growth = "—" if sig.growth_from_low_pct is None else f"{sig.growth_from_low_pct:+.2f}%"
+                strict_dist = "—" if sig.strict_distance_pct is None else f"{sig.strict_distance_pct:.2f}%"
+                lines.extend([
+                    f"  {idx}. checkpoint={sig.checkpoint}",
+                    f"     wave={sig.wave_type}; rating={sig.rating:.1f}; retrace={retrace}; fib={sig.fib_status}",
+                    f"     entry={_fmt(sig.entry)}; working_low={_fmt(sig.working_low)}; strict_origin={_fmt(sig.strict_origin)}; T1={_fmt(sig.t1)}",
+                    f"     growth_from_low={growth}; strict_distance={strict_dist}",
+                    f"     outcome={sig.outcome}; outcome_at={sig.outcome_at or '—'}; MFE={fnum(sig.mfe_pct)}; MAE={fnum(sig.mae_pct)}",
+                ])
+
+        lines.extend([
+            "",
+            "ПРИМЕЧАНИЕ",
+            "Это отдельная диагностика детектора. Она не меняет Search/Сопровождение, tracked-set или их таймер.",
+            "Каждый checkpoint использует только свечи, которые были доступны к тому моменту; будущие 1H свечи используются только для оценки результата после сигнала.",
+        ])
+        return "\n".join(lines).rstrip() + "\n"
 
     async def _ping(self, message: Message):
         t0 = time.perf_counter()

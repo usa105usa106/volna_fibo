@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import logging
 import math
+import time
 
 import pandas as pd
 
@@ -12,7 +13,7 @@ from config import Settings
 from core_models import MarketSnapshot, WaveState
 from core_ranking import select_top_crypto
 from core_senior import SeniorWaveDetector, control_no_setup, data_incomplete_state, no_setup_state
-from core_symbols import display_symbol, normalize_symbol
+from core_symbols import WALK_MAJOR_BASES, display_symbol, normalize_symbol
 from data_collector import MarketDataService
 from data_exchanges import ControlUnavailable
 from data_integrity import DataIntegrityError
@@ -39,6 +40,35 @@ class RunResult:
     requested_symbols: list[str] | None = None
     skipped_controls: list[str] = field(default_factory=list)
     successful_crypto_snapshots: int = 0
+    analysis_seconds: float = 0.0
+
+
+@dataclass(slots=True)
+class WalkSignalRecord:
+    symbol: str
+    checkpoint: str
+    wave_type: str
+    rating: float
+    entry: float
+    working_low: float | None
+    strict_origin: float
+    retrace_depth: float | None
+    fib_status: str
+    t1: float
+    outcome: str
+    outcome_at: str | None
+    mfe_pct: float | None
+    mae_pct: float | None
+    growth_from_low_pct: float | None
+    strict_distance_pct: float | None
+
+
+@dataclass(slots=True)
+class WalkAssetReport:
+    symbol: str
+    tested: bool
+    error: str | None = None
+    signals: list[WalkSignalRecord] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -61,6 +91,9 @@ class WalkForwardResult:
     rating_buckets: dict[str, tuple[int, int, int]]
     started_at: str
     finished_at: str
+    analysis_seconds: float
+    assets: list[WalkAssetReport] = field(default_factory=list)
+    wave_buckets: dict[str, tuple[int, int, int, int]] = field(default_factory=dict)
 
 
 class ScannerService:
@@ -95,6 +128,7 @@ class ScannerService:
     async def search(self) -> RunResult:
         """Fresh discovery only. Does NOT mutate the tracked session until commit_search()."""
         async with self.lock:
+            started_perf = time.perf_counter()
             settings = await self.repo.get_settings()
             exchange = settings.exchange
             top_n = settings.top_n
@@ -191,6 +225,7 @@ class ScannerService:
                 top_n,
                 skipped_controls=skipped_controls,
                 successful_crypto_snapshots=successful_snapshots,
+                analysis_seconds=time.perf_counter() - started_perf,
             )
 
     async def commit_search(self, result: RunResult, completed_at: str | None = None) -> int:
@@ -204,9 +239,10 @@ class ScannerService:
 
     async def track(self) -> RunResult:
         async with self.lock:
+            started_perf = time.perf_counter()
             session = await self.repo.active_session()
             if session is None:
-                return RunResult("track", [], 0, 0, ["NO_ACTIVE_SEARCH_SESSION"], "", 0)
+                return RunResult("track", [], 0, 0, ["NO_ACTIVE_SEARCH_SESSION"], "", 0, analysis_seconds=time.perf_counter() - started_perf)
             session_id, exchange, top_n = session
             previous = await self.repo.tracked_states(session_id)
             errors: list[str] = []
@@ -271,11 +307,13 @@ class ScannerService:
                 exchange,
                 top_n,
                 skipped_controls=skipped_controls,
+                analysis_seconds=time.perf_counter() - started_perf,
             )
 
     async def analyze_symbols(self, raw_symbols: list[str]) -> RunResult:
         """One-off fresh analysis of exactly the user-supplied symbols. No state mutation."""
         async with self.lock:
+            started_perf = time.perf_counter()
             settings = await self.repo.get_settings()
             exchange = settings.exchange
             top_n = settings.top_n
@@ -292,7 +330,7 @@ class ScannerService:
                     symbols.append(symbol)
 
             if not symbols:
-                return RunResult("manual", [], 0, 0, errors or ["NO_SYMBOLS"], exchange, top_n, [])
+                return RunResult("manual", [], 0, 0, errors or ["NO_SYMBOLS"], exchange, top_n, [], analysis_seconds=time.perf_counter() - started_perf)
 
             try:
                 universe = await self.data.universe(exchange, top_n)
@@ -334,18 +372,33 @@ class ScannerService:
                 exchange,
                 top_n,
                 [display_symbol(s) for s in symbols],
+                analysis_seconds=time.perf_counter() - started_perf,
             )
 
     async def walk_forward(self) -> WalkForwardResult:
-        """Diagnostic no-look-ahead replay. Does not touch Search/Tracking state or timers."""
+        """Fixed 10-major no-look-ahead detector diagnostic.
+
+        /walk is deliberately isolated from production Search/Tracking state. It never
+        scans the user's current Top-N and never persists candles or senior-wave state.
+        """
         async with self.lock:
             started = datetime.now(timezone.utc)
+            started_perf = time.perf_counter()
             settings = await self.repo.get_settings()
             exchange = settings.exchange
-            top_n = settings.top_n
-            universe = await self.data.universe(exchange, top_n)
-            if len(universe) < top_n:
-                raise RuntimeError(f"/walk: exchange returned only {len(universe)} instruments for Top-{top_n}")
+
+            # Production liquidity information is used only to give the detector the same
+            # rank/quote-volume context. Historical replay itself is strictly limited to
+            # these ten majors and never touches the rest of Top-100/200/300.
+            diagnostic_top_n = 300
+            try:
+                liquidity_universe = await self.data.universe(exchange, diagnostic_top_n)
+            except Exception:
+                log.exception("/walk liquidity universe failed; majors will use fallback ranks")
+                liquidity_universe = []
+            rank_map = {symbol: idx + 1 for idx, (symbol, _) in enumerate(liquidity_universe)}
+            qv_map = dict(liquidity_universe)
+            symbols = [normalize_symbol(exchange, base) for base in WALK_MAJOR_BASES]
 
             horizon = self.cfg.walk_horizon_days
             spacing = self.cfg.walk_spacing_days
@@ -362,15 +415,20 @@ class ScannerService:
             tested_assets = data_errors = 0
             mfe_values: list[float] = []
             mae_values: list[float] = []
-            # bucket -> [signals, t1_first, invalid_first]
             buckets: dict[str, list[int]] = {
                 "9.0+": [0, 0, 0],
                 "8.0–8.9": [0, 0, 0],
                 f"{self.cfg.min_rating:.1f}–7.9": [0, 0, 0],
             }
-
-            rank_map = {symbol: idx + 1 for idx, (symbol, _) in enumerate(universe)}
-            qv_map = dict(universe)
+            # wave -> [signals, t1, invalid, unresolved_or_ambiguous]
+            wave_buckets: dict[str, list[int]] = {
+                "W2": [0, 0, 0, 0],
+                "W3-(2)": [0, 0, 0, 0],
+            }
+            asset_reports: dict[str, WalkAssetReport] = {
+                display_symbol(symbol): WalkAssetReport(display_symbol(symbol), False)
+                for symbol in symbols
+            }
             aggregate_lock = asyncio.Lock()
 
             def rating_bucket(rating: float) -> str:
@@ -382,10 +440,13 @@ class ScannerService:
 
             async def one_asset(symbol: str):
                 nonlocal signals, t1_first, invalid_first, unresolved, ambiguous, tested_assets, data_errors
+                shown_symbol = display_symbol(symbol)
                 local_signals = local_t1 = local_invalid = local_unresolved = local_ambiguous = 0
                 local_mfe: list[float] = []
                 local_mae: list[float] = []
                 local_buckets = {k: [0, 0, 0] for k in buckets}
+                local_wave_buckets = {k: [0, 0, 0, 0] for k in wave_buckets}
+                local_records: list[WalkSignalRecord] = []
                 try:
                     full = await self.data.walk_history(
                         exchange,
@@ -394,10 +455,15 @@ class ScannerService:
                         h1_days=h1_days,
                         d1_days=d1_days,
                     )
-                except Exception:
+                except Exception as exc:
                     log.exception("/walk data failed for %s", symbol)
                     async with aggregate_lock:
                         data_errors += 1
+                        asset_reports[shown_symbol] = WalkAssetReport(
+                            shown_symbol,
+                            False,
+                            f"{type(exc).__name__}: {exc}",
+                        )
                     return
 
                 def evaluate_history():
@@ -421,7 +487,8 @@ class ScannerService:
                             hourly_closed=h1_hist.tail(self.cfg.lookback_1h_days * 24 + 48).copy(),
                             daily_closed=d1_hist.tail(self.cfg.lookback_1d_days + 5).copy(),
                         )
-                        state = self.detector.detect(snap, rank_map.get(symbol), top_n)
+                        rank = rank_map.get(symbol, diagnostic_top_n + 1)
+                        state = self.detector.detect(snap, rank, diagnostic_top_n)
                         if state is None or (state.rating or 0.0) < self.cfg.min_rating:
                             continue
                         if not state.targets or state.strict_origin is None or state.current_price is None:
@@ -430,43 +497,75 @@ class ScannerService:
                         local_signals += 1
                         bucket = rating_bucket(float(state.rating or 0.0))
                         local_buckets[bucket][0] += 1
+                        wave = state.wave_type if state.wave_type in local_wave_buckets else "W2"
+                        local_wave_buckets[wave][0] += 1
 
                         future_end = checkpoint + pd.Timedelta(days=horizon)
                         future = h1_all[(h1_all["timestamp"] >= checkpoint) & (h1_all["timestamp"] < future_end)].copy()
-                        if future.empty:
-                            local_unresolved += 1
-                            continue
-
                         entry = float(state.current_price)
-                        local_mfe.append((float(future["high"].max()) / entry - 1.0) * 100.0)
-                        local_mae.append((float(future["low"].min()) / entry - 1.0) * 100.0)
                         t1 = float(state.targets[0])
                         strict = float(state.strict_origin)
-
                         outcome = "unresolved"
-                        for row in future.itertuples(index=False):
-                            hit_t1 = float(row.high) >= t1
-                            hit_invalid = float(row.low) < strict
-                            if hit_t1 and hit_invalid:
-                                outcome = "ambiguous"
-                                break
-                            if hit_t1:
-                                outcome = "t1"
-                                break
-                            if hit_invalid:
-                                outcome = "invalid"
-                                break
+                        outcome_at: str | None = None
+                        mfe: float | None = None
+                        mae: float | None = None
+
+                        if not future.empty:
+                            mfe = (float(future["high"].max()) / entry - 1.0) * 100.0
+                            mae = (float(future["low"].min()) / entry - 1.0) * 100.0
+                            local_mfe.append(mfe)
+                            local_mae.append(mae)
+                            for row in future.itertuples(index=False):
+                                hit_t1 = float(row.high) >= t1
+                                hit_invalid = float(row.low) < strict
+                                if hit_t1 and hit_invalid:
+                                    outcome = "ambiguous"
+                                    outcome_at = pd.Timestamp(row.timestamp).isoformat()
+                                    break
+                                if hit_t1:
+                                    outcome = "t1"
+                                    outcome_at = pd.Timestamp(row.timestamp).isoformat()
+                                    break
+                                if hit_invalid:
+                                    outcome = "invalid"
+                                    outcome_at = pd.Timestamp(row.timestamp).isoformat()
+                                    break
 
                         if outcome == "t1":
                             local_t1 += 1
                             local_buckets[bucket][1] += 1
+                            local_wave_buckets[wave][1] += 1
                         elif outcome == "invalid":
                             local_invalid += 1
                             local_buckets[bucket][2] += 1
+                            local_wave_buckets[wave][2] += 1
                         elif outcome == "ambiguous":
                             local_ambiguous += 1
+                            local_wave_buckets[wave][3] += 1
                         else:
                             local_unresolved += 1
+                            local_wave_buckets[wave][3] += 1
+
+                        local_records.append(
+                            WalkSignalRecord(
+                                symbol=shown_symbol,
+                                checkpoint=checkpoint.isoformat(),
+                                wave_type=state.wave_type,
+                                rating=float(state.rating or 0.0),
+                                entry=entry,
+                                working_low=state.working_low,
+                                strict_origin=strict,
+                                retrace_depth=state.retrace_depth,
+                                fib_status=state.fib_status,
+                                t1=t1,
+                                outcome=outcome,
+                                outcome_at=outcome_at,
+                                mfe_pct=mfe,
+                                mae_pct=mae,
+                                growth_from_low_pct=state.growth_from_low_pct,
+                                strict_distance_pct=state.strict_distance_pct,
+                            )
+                        )
 
                 await self._compute(evaluate_history)
 
@@ -482,13 +581,17 @@ class ScannerService:
                     for key, vals in local_buckets.items():
                         for i in range(3):
                             buckets[key][i] += vals[i]
+                    for key, vals in local_wave_buckets.items():
+                        for i in range(4):
+                            wave_buckets[key][i] += vals[i]
+                    asset_reports[shown_symbol] = WalkAssetReport(shown_symbol, True, None, local_records)
 
-            await self._map(one_asset, [symbol for symbol, _ in universe])
+            await self._map(one_asset, symbols)
             finished = datetime.now(timezone.utc)
             return WalkForwardResult(
                 exchange=exchange,
-                top_n=top_n,
-                assets_requested=len(universe),
+                top_n=len(symbols),
+                assets_requested=len(symbols),
                 assets_tested=tested_assets,
                 checkpoints=count,
                 spacing_days=spacing,
@@ -504,4 +607,8 @@ class ScannerService:
                 rating_buckets={k: tuple(v) for k, v in buckets.items()},
                 started_at=started.isoformat(),
                 finished_at=finished.isoformat(),
+                analysis_seconds=time.perf_counter() - started_perf,
+                assets=[asset_reports[base] for base in WALK_MAJOR_BASES],
+                wave_buckets={k: tuple(v) for k, v in wave_buckets.items()},
             )
+

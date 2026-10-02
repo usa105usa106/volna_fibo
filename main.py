@@ -24,7 +24,7 @@ async def main():
     )
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
 
-    # v0010 never persists candles. Clean known temporary/legacy artifacts on boot.
+    # v0011 never persists candles. Clean known temporary/legacy artifacts on boot.
     cleanup_runtime_files(cfg.data_dir, cfg.db_path)
 
     defaults = AppSettings(

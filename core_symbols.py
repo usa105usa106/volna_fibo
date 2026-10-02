@@ -14,6 +14,12 @@ STABLE_BASES = frozenset({
 
 CONTROL_BASES = frozenset({"XAU", "USOIL"})
 
+WALK_MAJOR_BASES = ("BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "LINK", "LTC", "BCH")
+
+# Commodity duplicates must never consume a crypto Top-N slot because XAU/USOIL
+# are analyzed separately as permanent exchange controls.
+COMMODITY_DUPLICATE_BASES = frozenset({"XAUT", "UKOIL"})
+
 # Exact leveraged-token bases only. Never infer leverage from a suffix alone:
 # JUP is a normal token and must not be rejected merely because it ends in "UP".
 _LEVERAGED_UNDERLYINGS = frozenset({
@@ -30,7 +36,12 @@ LEVERAGED_BASES = frozenset(
 
 def excluded_from_crypto_top(base: str) -> bool:
     """Return True only for explicit non-crypto-top instruments."""
-    return base in STABLE_BASES or base in CONTROL_BASES or base in LEVERAGED_BASES
+    return (
+        base in STABLE_BASES
+        or base in CONTROL_BASES
+        or base in COMMODITY_DUPLICATE_BASES
+        or base in LEVERAGED_BASES
+    )
 
 
 def normalize_symbol(exchange: str, raw: str) -> str:

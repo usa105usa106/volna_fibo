@@ -9,6 +9,8 @@ from core_ranking import SEARCH_TOP_CRYPTO, select_top_crypto
 import asyncio
 from data_exchanges import BinanceSpotClient, MexcFuturesClient
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
 import ast
 from config import Settings
 from data_collector import MarketDataService
@@ -433,7 +435,7 @@ def test_market_snapshot_redownloads_full_lookback_every_time(tmp_path):
 
 def test_controller_marks_interval_anchor_after_report_call():
     """AST regression test: reporting must precede mark_report_complete in both run paths."""
-    source = Path(__file__).parents[1].joinpath("app/bot/handlers.py").read_text()
+    source = ROOT / "bot_handlers.py".read_text()
     tree = ast.parse(source)
     cls = next(
         n
@@ -466,7 +468,7 @@ def test_cyclic_toggle_sequences_are_exact():
 
 
 def test_keyboard_source_uses_single_cyclic_setting_buttons_and_mode_dot():
-    source = Path(__file__).parents[1].joinpath("app/bot/keyboards.py").read_text()
+    source = ROOT / "bot_keyboards.py".read_text()
     tree = ast.parse(source)
 
     # The active action mode is marked with a dot, while toggle buttons use only
@@ -493,7 +495,7 @@ def test_keyboard_source_uses_single_cyclic_setting_buttons_and_mode_dot():
 
 
 def test_clean_button_source_accepts_current_dot_and_legacy_checkmark():
-    source = Path(__file__).parents[1].joinpath("app/bot/keyboards.py").read_text()
+    source = ROOT / "bot_keyboards.py".read_text()
     assert '("● ", "✅ ")' in source
 
 
@@ -575,7 +577,7 @@ def test_api_retry_backoff_reaches_success_after_retryable_5xx():
 
 def test_safe_search_reset_commits_only_after_report_delivery():
     scanner_source = (
-        Path(__file__).parents[1].joinpath("app/services/scanner.py").read_text()
+        ROOT / "services_scanner.py".read_text()
     )
     scanner_tree = ast.parse(scanner_source)
     scanner_cls = next(
@@ -597,7 +599,7 @@ def test_safe_search_reset_commits_only_after_report_delivery():
     assert "replace_active_session" not in attrs
 
     handler_source = (
-        Path(__file__).parents[1].joinpath("app/bot/handlers.py").read_text()
+        ROOT / "bot_handlers.py".read_text()
     )
     handler_tree = ast.parse(handler_source)
     controller_cls = next(
@@ -622,7 +624,7 @@ def test_safe_search_reset_commits_only_after_report_delivery():
 
 
 def test_walk_forward_is_state_read_only_and_separate_from_search():
-    source = Path(__file__).parents[1].joinpath("app/services/scanner.py").read_text()
+    source = ROOT / "services_scanner.py".read_text()
     tree = ast.parse(source)
     cls = next(
         n
@@ -646,7 +648,7 @@ def test_walk_forward_is_state_read_only_and_separate_from_search():
 
 
 def test_no_yahoo_commodity_proxy_remains_in_runtime_source():
-    root = Path(__file__).parents[1].joinpath("app")
+    root = ROOT
     joined = "\n".join(p.read_text() for p in root.rglob("*.py"))
     assert "YahooCommodityClient" not in joined
     assert "GC=F" not in joined
@@ -654,14 +656,14 @@ def test_no_yahoo_commodity_proxy_remains_in_runtime_source():
     assert "query1.finance.yahoo.com" not in joined
 
 
-def test_version_0010_is_default():
+def test_version_0011_is_default():
     cfg = Settings(BOT_TOKEN="test")
-    assert cfg.bot_version == "0010"
+    assert cfg.bot_version == "0011"
     assert cfg.default_top_n == 100
 
 
 def test_repository_reset_source_clears_sessions_kv_and_restores_idle_defaults():
-    source = Path(__file__).parents[1].joinpath("app/db/repository.py").read_text()
+    source = ROOT / "db_repository.py".read_text()
     tree = ast.parse(source)
     cls = next(
         n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Repository"
@@ -705,7 +707,7 @@ def test_runtime_cleanup_removes_temp_artifacts_but_preserves_sqlite(tmp_path):
 
 
 def test_reset_handler_stops_scheduler_cancels_tasks_and_clears_state():
-    source = Path(__file__).parents[1].joinpath("app/bot/handlers.py").read_text()
+    source = ROOT / "bot_handlers.py".read_text()
     tree = ast.parse(source)
     cls = next(
         n
@@ -731,7 +733,7 @@ def test_reset_handler_stops_scheduler_cancels_tasks_and_clears_state():
 
 
 def test_scheduler_can_restart_after_stop():
-    source = Path(__file__).parents[1].joinpath("app/services/scheduler.py").read_text()
+    source = ROOT / "services_scheduler.py".read_text()
     assert "self._task = None" in source
 
 
@@ -779,15 +781,15 @@ def test_telegram_table_never_uses_scientific_notation_for_price_low_zones_or_ta
 
 
 def test_readme_and_runtime_have_no_stale_v0007_markers():
-    root = Path(__file__).parents[1]
+    root = ROOT
     files = [root / "README.md", root / ".env.example", root / "Dockerfile"]
     joined = "\n".join(p.read_text() for p in files)
     assert "0007" not in joined
-    assert "0010" in joined
+    assert "0011" in joined
 
 
 def test_tracking_bad_fresh_data_is_report_only_and_not_persisted_source_contract():
-    source = Path(__file__).parents[1].joinpath("app/services/scanner.py").read_text()
+    source = ROOT / "services_scanner.py".read_text()
     # Diagnostic rows must be visibly marked and returned with no persistable state.
     assert 'shown.status = "DATA_INCOMPLETE"' in source
     assert "shown.current_price = None" in source
@@ -799,7 +801,7 @@ def test_tracking_bad_fresh_data_is_report_only_and_not_persisted_source_contrac
 
 
 def test_active_session_swap_is_explicit_transaction_with_rollback():
-    source = Path(__file__).parents[1].joinpath("app/db/repository.py").read_text()
+    source = ROOT / "db_repository.py".read_text()
     assert "BEGIN IMMEDIATE" in source
     assert "await db.rollback()" in source
     assert "UPDATE search_sessions SET active=0 WHERE active=1" in source
