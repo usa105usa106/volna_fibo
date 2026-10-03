@@ -483,19 +483,13 @@ class ScannerService:
             def structure_key(state: WaveState) -> str:
                 """Stable senior identity; re-observing the same living wave is not a new signal."""
                 if state.wave_type == "W3-(2)":
+                    # One parent W2 can own only one senior W3-(2).  A later higher
+                    # W3 high must not create another "fresh" diagnostic signal.
                     left = state.parent_w2_ts or _price_key(state.parent_w2_low or state.strict_origin)
-                    right = state.w3_1_high_ts or _price_key(state.w3_1_high or state.impulse_high)
-                else:
-                    left = state.impulse_start_ts or _price_key(state.origin or state.strict_origin)
-                    right = state.impulse_high_ts or _price_key(state.impulse_high)
-                return "|".join(
-                    [
-                        state.wave_type,
-                        left,
-                        right,
-                        _price_key(state.strict_origin),
-                    ]
-                )
+                    return "|".join([state.wave_type, left, _price_key(state.strict_origin)])
+                left = state.impulse_start_ts or _price_key(state.origin or state.strict_origin)
+                right = state.impulse_high_ts or _price_key(state.impulse_high)
+                return "|".join([state.wave_type, left, right, _price_key(state.strict_origin)])
 
             async def one_asset(symbol: str):
                 nonlocal signals, t1_first, invalid_first, unresolved, ambiguous

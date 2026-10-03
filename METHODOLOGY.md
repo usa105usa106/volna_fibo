@@ -1,64 +1,78 @@
-# Senior-wave methodology used by v0013
+# Senior-wave methodology used by v0014
 
 ## Structural hierarchy
 
-- 1D identifies senior impulse/origin context.
-- COMPLETE4H is built only from exactly four closed 1H candles.
-- New senior anchors/re-anchors come only from COMPLETE4H.
-- Intrabar 1H data may immediately invalidate a count if strict origin is wicked through.
-- No 1m/5m/15m/1H move creates a new global Elliott label.
+- 1D задаёт senior impulse/origin context.
+- COMPLETE4H строится только из четырёх полностью закрытых 1H свечей.
+- Новые senior anchors/re-anchors создаются только COMPLETE4H.
+- 1H intrabar может немедленно инвалидировать count при strict-origin wick break, но не создаёт новый Elliott label.
+- Бот ищет только **global W2** и **first nested W3-(2)**. Микроволны не размечаются.
 
-## Setups
+## Global W2 lifecycle
 
-The production detector searches only:
+1. На 1D/COMPLETE4H определяется senior W1 origin -> W1 high.
+2. W2 может углубляться/re-anchor только пока рынок не принял W1 high обратно.
+3. Первый COMPLETE4H close выше W1 high **lock'ит W2**.
+4. После lock более поздний pullback внутри W3/W4 не имеет права переписать старый W2 low.
+5. Если strict origin пробит wick'ом — старый count INVALID немедленно.
 
-- global W2 after a senior W1;
-- nested W3-(2) after W2 → W3-(1).
+## Nested W3-(2) lifecycle
 
-Deep strict-valid corrections are preferred, but depth never overrides strict-origin validity. A nested W3-(2) is allowed from a COMPLETE4H-confirmed correction of 20%+ of W3-(1); requiring 50%+ was too restrictive and kept active W3 structures mislabeled as their old global W2. INVALID/RECOUNT states drop obsolete Fib/targets/zones.
+1. После W2 начинается W3-(1).
+2. Пока senior pullback не достиг минимальной глубины, higher highs просто **расширяют тот же W3-(1)**.
+3. Первый qualifying COMPLETE4H senior pullback `>=20%` от W3-(1) становится единственной W3-(2) этого parent W2.
+4. Working low W3-(2) может re-anchor только пока W3-(1) high ещё не принят обратно.
+5. Первый COMPLETE4H close выше locked W3-(1) high завершает/consumes эту W3-(2).
+6. После consumption тот же parent W2 **не может** породить вторую W3-(2). Следующая коррекция относится к дальнейшему развитию W3, а не переименовывается в `(2)`.
 
-For an active setup, execution zones are anchored to the confirmed working low:
+Это правило специально защищает от предыдущей версии failure mode, где BTC/ETH и другие активы получали новую W3-(2) после почти каждого higher high.
 
-- `База`: working low through the first `.236` recovery of the correction back toward the impulse high;
-- `На вынос`: only a narrow sweep buffer immediately below working low, never a recycled deep parent-Fib zone.
+## Active-state selection
 
-Senior targets remain projections from the current working low using the established impulse multipliers `1.0 / 1.618 / 2.618 / 4.236`.
+Fresh Search пересчитывает всё с нуля и оценивает все валидные senior parents. Приоритет:
 
-Rating is an opportunity score. It combines degree/progression, retrace quality, distance from working low, COMPLETE4H recovery durability, T1 convexity, liquidity and strict-origin fragility. A fresh W3-(2) with large T1 room must outrank a stale global W2 whose price has already moved far from its low.
+1. текущая **не consumed W3-(2)**;
+2. текущая **не locked W2**;
+3. внутри одного класса — более крупный senior parent impulse, затем более свежий working low.
 
-## Fresh Search
+Так более новый child-count не затирает всё ещё активный senior W3-(2).
 
-Search has no candle/parquet cache. Each run downloads the configured full exchange history and reconstructs the senior map from scratch. Only the successfully delivered Search is atomically installed as the new accompaniment set.
+## Fib / recovery
 
-Top-N excludes stable/pegged assets, exact leveraged products, XAU/USOIL controls, and the duplicate commodity symbols XAUT/UKOIL.
+Recovery измеряется COMPLETE4H closes по `.236/.382/.500/.618/.705/.786/.886/.950`. Intrabar reclaim сам по себе структурным подтверждением не считается. `3/3 C4H` сильнее `2/3`, `2/3` сильнее одиночного reclaim.
 
-## XAU / USOIL
+## Targets
 
-XAU and USOIL are permanent separate controls outside the crypto TOP-10 and come only from the currently selected exchange. Absence/unavailability skips that control without breaking crypto discovery.
+Targets только senior:
 
-## Reporting
+`Tn = working_low + multiplier × locked_impulse_length`
 
-v0013 keeps the senior-only doctrine but corrects the production hierarchy/rating/execution-zone implementation described above. Reporting remains:
+где multipliers: `1.0 / 1.618 / 2.618 / 4.236`.
 
-- main table → PNG with true vertical columns;
-- full diagnostic state → attached UTF-8 `.txt`;
-- caption → analysis duration, scope/errors and best current crypto setups.
+Для W2 locked impulse = global W1. Для W3-(2) locked impulse = `parent W2 -> W3-(1) high`. После появления первой W3-(2) W3-(1) high больше не дрейфует вслед за дальнейшими higher highs.
 
-## /walk methodology
+Reference regressions:
 
-`/walk` is isolated from Search/Accompaniment state. It is a no-look-ahead diagnostic over a fixed liquid set:
+- BCH: `parent W2 212.90 -> W3-(1) 317.70 -> W3-(2) 296.10` -> `400.90 / 465.6664 / 570.4664 / 740.0328`.
+- GRAM: `1.286 -> 1.740 -> 1.460` -> `1.914 / 2.194572 / 2.648572 / 3.383144`.
+
+## Rating
+
+Rating — opportunity score, не «качество монеты». Учитываются senior degree, retrace, свежесть от low, COMPLETE4H recovery, T1 convexity, liquidity/execution и fragility до strict origin.
+
+Shallow `20–38.2%` W3-(2) остаётся валидной, но больше не получает чрезмерный premium только за label. Для BCH-reference `.382 · 2/3 C4H` калибровочный rating = `8.8`.
+
+## Search / Tracking
+
+- Search каждый раз скачивает/строит candles заново; candle/parquet cache отсутствует.
+- Accompaniment сопровождает только symbols последнего успешного Search.
+- Consumed W2/W3-(2) не re-anchor'ится более поздними lows.
+- Strict-origin break инвалидирует старый count немедленно.
+
+## /walk
+
+`/walk` изолирован от Search/Track и всегда использует:
 
 `BTC, ETH, SOL, BNB, XRP, DOGE, ADA, LINK, LTC, BCH`.
 
-The diagnostic walks sequentially through **every completed UTC COMPLETE4H** in the configured historical window (`WALK_HISTORY_DAYS`, default 180). At each checkpoint the detector sees only candles that had already closed by that moment.
-
-A senior structure is identified by its senior anchors, not by every re-observation of the same living pullback. Therefore:
-
-- the same W2 or W3-(2) is counted once, at the first qualifying fresh observation;
-- later observations of that same structure are recorded as duplicates but do not improve hit-rate statistics;
-- a candidate already at/above T1, or already `EXTENDED`, is excluded from fresh-signal statistics;
-- future 1H candles are used only after signal creation to classify T1-first / strict-invalid-first / unresolved / ambiguous;
-- MFE/MAE to first resolution are kept separate from full-horizon 30d MFE/MAE;
-- the report preserves anchors, Fib levels, zones, targets, liquidity rank, timing and exclusion reasons for manual detector polishing.
-
-`/walk` writes no candle cache and changes no production session/timer.
+Каждый COMPLETE4H проверяется без look-ahead. Для W3-(2) identity привязана к parent W2: **one parent = one W3-(2)**. Future 1H используются только после фиксации fresh signal для T1/invalid/unresolved и MFE/MAE.
