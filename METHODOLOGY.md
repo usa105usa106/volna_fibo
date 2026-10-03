@@ -1,4 +1,4 @@
-# Senior-wave methodology used by v0011
+# Senior-wave methodology used by v0013
 
 ## Structural hierarchy
 
@@ -15,7 +15,16 @@ The production detector searches only:
 - global W2 after a senior W1;
 - nested W3-(2) after W2 → W3-(1).
 
-Deep strict-valid corrections are preferred, but depth never overrides strict-origin validity. INVALID/RECOUNT states drop obsolete Fib/targets/zones.
+Deep strict-valid corrections are preferred, but depth never overrides strict-origin validity. A nested W3-(2) is allowed from a COMPLETE4H-confirmed correction of 20%+ of W3-(1); requiring 50%+ was too restrictive and kept active W3 structures mislabeled as their old global W2. INVALID/RECOUNT states drop obsolete Fib/targets/zones.
+
+For an active setup, execution zones are anchored to the confirmed working low:
+
+- `База`: working low through the first `.236` recovery of the correction back toward the impulse high;
+- `На вынос`: only a narrow sweep buffer immediately below working low, never a recycled deep parent-Fib zone.
+
+Senior targets remain projections from the current working low using the established impulse multipliers `1.0 / 1.618 / 2.618 / 4.236`.
+
+Rating is an opportunity score. It combines degree/progression, retrace quality, distance from working low, COMPLETE4H recovery durability, T1 convexity, liquidity and strict-origin fragility. A fresh W3-(2) with large T1 room must outrank a stale global W2 whose price has already moved far from its low.
 
 ## Fresh Search
 
@@ -29,7 +38,7 @@ XAU and USOIL are permanent separate controls outside the crypto TOP-10 and come
 
 ## Reporting
 
-The trading methodology is unchanged by v0011. Only presentation changes:
+v0013 keeps the senior-only doctrine but corrects the production hierarchy/rating/execution-zone implementation described above. Reporting remains:
 
 - main table → PNG with true vertical columns;
 - full diagnostic state → attached UTF-8 `.txt`;
@@ -41,11 +50,15 @@ The trading methodology is unchanged by v0011. Only presentation changes:
 
 `BTC, ETH, SOL, BNB, XRP, DOGE, ADA, LINK, LTC, BCH`.
 
-For each configured historical checkpoint the detector sees only candles that had closed by that checkpoint. If a qualifying W2/W3-(2) exists, later 1H candles within the configured horizon are used only to classify the outcome:
+The diagnostic walks sequentially through **every completed UTC COMPLETE4H** in the configured historical window (`WALK_HISTORY_DAYS`, default 180). At each checkpoint the detector sees only candles that had already closed by that moment.
 
-- T1 first;
-- strict invalidation first;
-- unresolved;
-- T1 and strict invalidation in the same 1H candle (ordering ambiguous).
+A senior structure is identified by its senior anchors, not by every re-observation of the same living pullback. Therefore:
 
-The report records MFE/MAE, rating bucket, wave type and the exact state values needed to inspect detector errors. `/walk` writes no candle cache and changes no production session/timer.
+- the same W2 or W3-(2) is counted once, at the first qualifying fresh observation;
+- later observations of that same structure are recorded as duplicates but do not improve hit-rate statistics;
+- a candidate already at/above T1, or already `EXTENDED`, is excluded from fresh-signal statistics;
+- future 1H candles are used only after signal creation to classify T1-first / strict-invalid-first / unresolved / ambiguous;
+- MFE/MAE to first resolution are kept separate from full-horizon 30d MFE/MAE;
+- the report preserves anchors, Fib levels, zones, targets, liquidity rank, timing and exclusion reasons for manual detector polishing.
+
+`/walk` writes no candle cache and changes no production session/timer.

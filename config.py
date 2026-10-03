@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     bot_token: str = Field(alias="BOT_TOKEN")
     data_dir: Path = Field(default=Path("/data"), alias="DATA_DIR")
     bot_timezone: str = Field(default="Europe/Moscow", alias="BOT_TIMEZONE")
-    bot_version: str = Field(default="0011", alias="BOT_VERSION")
+    bot_version: str = Field(default="0013", alias="BOT_VERSION")
 
     default_top_n: int = Field(default=100, alias="DEFAULT_TOP_N")
     default_interval_minutes: int = Field(default=60, alias="DEFAULT_INTERVAL_MINUTES")
@@ -35,8 +35,7 @@ class Settings(BaseSettings):
     action_cooldown_seconds: int = Field(default=60, alias="ACTION_COOLDOWN_SECONDS", ge=0)
 
     # /walk is a separate diagnostic and never changes Search/Tracking state.
-    walk_checkpoints: int = Field(default=6, alias="WALK_CHECKPOINTS")
-    walk_spacing_days: int = Field(default=30, alias="WALK_SPACING_DAYS", gt=0)
+    walk_history_days: int = Field(default=180, alias="WALK_HISTORY_DAYS", gt=0)
     walk_horizon_days: int = Field(default=30, alias="WALK_HORIZON_DAYS", gt=0)
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
@@ -62,11 +61,11 @@ class Settings(BaseSettings):
             raise ValueError("SEARCH_MIN_SUCCESS_FRACTION must be between 0.5 and 1.0")
         return v
 
-    @field_validator("api_retry_attempts", "telegram_retry_attempts", "walk_checkpoints")
+    @field_validator("api_retry_attempts", "telegram_retry_attempts")
     @classmethod
     def validate_positive_int(cls, v: int) -> int:
         if v < 1:
-            raise ValueError("retry/checkpoint values must be >= 1")
+            raise ValueError("retry values must be >= 1")
         return v
 
     @property

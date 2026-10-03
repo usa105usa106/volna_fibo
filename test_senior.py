@@ -151,9 +151,12 @@ def test_favorable_fields_are_bold_in_telegram_table():
         rating=9.2,
     )
     msg = telegram_table_messages([state], "TEST")[0]
-    assert "<b>DOGE</b>" in msg
+    assert "DOGE" in msg
+    assert "<b>DOGE</b>" not in msg
     assert "<b>9.2</b>" in msg
-    assert "<b>&gt; .382 · 2/3 C4H</b>" in msg
+    # 2/3 recovery is valid but not strong enough for the sparse 3/3 emphasis rule.
+    assert "<b>&gt; .382 · 2/3 C4H</b>" not in msg
+    assert "&gt; .382 · 2/3 C4H" in msg
     assert "DOGEUSDT" not in msg
 
 
@@ -255,7 +258,7 @@ def test_formatter_renders_controls_in_separate_unranked_section():
     joined = "\n".join(msgs)
     assert "TOP-10" in joined
     assert "XAU / USOIL — ДОПОЛНИТЕЛЬНО, ВНЕ РЕЙТИНГА" in joined
-    assert "1 | <b>DOGE</b>" in joined
+    assert "1 | DOGE" in joined
     assert "— | XAU" in joined
     assert "— | USOIL" in joined
     assert "2 | XAU" not in joined
@@ -656,9 +659,9 @@ def test_no_yahoo_commodity_proxy_remains_in_runtime_source():
     assert "query1.finance.yahoo.com" not in joined
 
 
-def test_version_0011_is_default():
+def test_version_0013_is_default():
     cfg = Settings(BOT_TOKEN="test")
-    assert cfg.bot_version == "0011"
+    assert cfg.bot_version == "0013"
     assert cfg.default_top_n == 100
 
 
@@ -785,7 +788,7 @@ def test_readme_and_runtime_have_no_stale_v0007_markers():
     files = [root / "README.md", root / ".env.example", root / "Dockerfile"]
     joined = "\n".join(p.read_text() for p in files)
     assert "0007" not in joined
-    assert "0011" in joined
+    assert "0013" in joined
 
 
 def test_tracking_bad_fresh_data_is_report_only_and_not_persisted_source_contract():

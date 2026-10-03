@@ -46,21 +46,50 @@ class RunResult:
 @dataclass(slots=True)
 class WalkSignalRecord:
     symbol: str
-    checkpoint: str
+    structure_id: str
+    first_seen: str
+    last_seen: str
+    observations: int
     wave_type: str
+    state_status: str
     rating: float
     entry: float
+    origin: float | None
+    impulse_high: float | None
     working_low: float | None
     strict_origin: float
+    parent_w2_low: float | None
+    w3_1_high: float | None
     retrace_depth: float | None
     fib_status: str
+    fibs: dict[str, float]
+    targets: list[float]
+    base_zone: tuple[float, float] | None
+    deep_zone: tuple[float, float] | None
     t1: float
     outcome: str
     outcome_at: str | None
-    mfe_pct: float | None
-    mae_pct: float | None
+    hours_to_outcome: float | None
+    mfe_to_resolution_pct: float | None
+    mae_to_resolution_pct: float | None
+    mfe_30d_pct: float | None
+    mae_30d_pct: float | None
     growth_from_low_pct: float | None
     strict_distance_pct: float | None
+    liquidity_rank: int | None
+    last_complete4h_bucket: str | None
+
+
+@dataclass(slots=True)
+class WalkExcludedRecord:
+    symbol: str
+    structure_id: str
+    first_seen: str
+    wave_type: str
+    rating: float
+    entry: float
+    t1: float | None
+    reason: str
 
 
 @dataclass(slots=True)
@@ -69,6 +98,10 @@ class WalkAssetReport:
     tested: bool
     error: str | None = None
     signals: list[WalkSignalRecord] = field(default_factory=list)
+    excluded: list[WalkExcludedRecord] = field(default_factory=list)
+    checkpoints_evaluated: int = 0
+    qualifying_observations: int = 0
+    duplicate_observations: int = 0
 
 
 @dataclass(slots=True)
@@ -77,17 +110,21 @@ class WalkForwardResult:
     top_n: int
     assets_requested: int
     assets_tested: int
-    checkpoints: int
-    spacing_days: int
     horizon_days: int
+    history_days: int
+    complete4h_checkpoints: int
     signals: int
     t1_first: int
     invalid_first: int
     unresolved: int
     ambiguous: int
+    already_extended: int
+    duplicate_observations: int
     data_errors: int
     median_mfe_pct: float | None
     median_mae_pct: float | None
+    median_mfe_30d_pct: float | None
+    median_mae_30d_pct: float | None
     rating_buckets: dict[str, tuple[int, int, int]]
     started_at: str
     finished_at: str
@@ -376,10 +413,12 @@ class ScannerService:
             )
 
     async def walk_forward(self) -> WalkForwardResult:
-        """Fixed 10-major no-look-ahead detector diagnostic.
+        """Detailed fixed-10-major no-look-ahead detector diagnostic.
 
-        /walk is deliberately isolated from production Search/Tracking state. It never
-        scans the user's current Top-N and never persists candles or senior-wave state.
+        The diagnostic is intentionally isolated from production Search/Tracking state.
+        It evaluates every completed UTC 4H boundary across the historical diagnostic
+        window, records each senior structure only once when it first becomes a fresh
+        qualifying setup, and keeps future candles exclusively for outcome scoring.
         """
         async with self.lock:
             started = datetime.now(timezone.utc)
@@ -387,9 +426,6 @@ class ScannerService:
             settings = await self.repo.get_settings()
             exchange = settings.exchange
 
-            # Production liquidity information is used only to give the detector the same
-            # rank/quote-volume context. Historical replay itself is strictly limited to
-            # these ten majors and never touches the rest of Top-100/200/300.
             diagnostic_top_n = 300
             try:
                 liquidity_universe = await self.data.universe(exchange, diagnostic_top_n)
@@ -401,20 +437,23 @@ class ScannerService:
             symbols = [normalize_symbol(exchange, base) for base in WALK_MAJOR_BASES]
 
             horizon = self.cfg.walk_horizon_days
-            spacing = self.cfg.walk_spacing_days
-            count = self.cfg.walk_checkpoints
+            # Preserve the old 6 x 30d knobs as a simple 180d default history window,
+            # while evaluating every COMPLETE4H instead of only six monthly snapshots.
+            history_days = self.cfg.walk_history_days
             now = pd.Timestamp.now(tz="UTC").floor("h")
-            latest = now - pd.Timedelta(days=horizon)
-            checkpoints = [latest - pd.Timedelta(days=spacing * i) for i in range(count - 1, -1, -1)]
-            earliest = checkpoints[0]
-            history_span_days = max(0, math.ceil((now - earliest).total_seconds() / 86400))
+            latest_checkpoint = now - pd.Timedelta(days=horizon)
+            earliest_checkpoint = latest_checkpoint - pd.Timedelta(days=history_days)
+            history_span_days = max(0, math.ceil((now - earliest_checkpoint).total_seconds() / 86400))
             h1_days = history_span_days + self.cfg.lookback_1h_days + 3
             d1_days = history_span_days + self.cfg.lookback_1d_days + 3
 
             signals = t1_first = invalid_first = unresolved = ambiguous = 0
-            tested_assets = data_errors = 0
-            mfe_values: list[float] = []
-            mae_values: list[float] = []
+            already_extended = duplicate_observations = 0
+            tested_assets = data_errors = complete4h_checkpoints = 0
+            resolution_mfe_values: list[float] = []
+            resolution_mae_values: list[float] = []
+            full_mfe_values: list[float] = []
+            full_mae_values: list[float] = []
             buckets: dict[str, list[int]] = {
                 "9.0+": [0, 0, 0],
                 "8.0–8.9": [0, 0, 0],
@@ -438,15 +477,40 @@ class ScannerService:
                     return "8.0–8.9"
                 return f"{self.cfg.min_rating:.1f}–7.9"
 
+            def _price_key(value: float | None) -> str:
+                return "—" if value is None else f"{float(value):.12g}"
+
+            def structure_key(state: WaveState) -> str:
+                """Stable senior identity; re-observing the same living wave is not a new signal."""
+                if state.wave_type == "W3-(2)":
+                    left = state.parent_w2_ts or _price_key(state.parent_w2_low or state.strict_origin)
+                    right = state.w3_1_high_ts or _price_key(state.w3_1_high or state.impulse_high)
+                else:
+                    left = state.impulse_start_ts or _price_key(state.origin or state.strict_origin)
+                    right = state.impulse_high_ts or _price_key(state.impulse_high)
+                return "|".join(
+                    [
+                        state.wave_type,
+                        left,
+                        right,
+                        _price_key(state.strict_origin),
+                    ]
+                )
+
             async def one_asset(symbol: str):
-                nonlocal signals, t1_first, invalid_first, unresolved, ambiguous, tested_assets, data_errors
+                nonlocal signals, t1_first, invalid_first, unresolved, ambiguous
+                nonlocal already_extended, duplicate_observations, tested_assets, data_errors, complete4h_checkpoints
                 shown_symbol = display_symbol(symbol)
                 local_signals = local_t1 = local_invalid = local_unresolved = local_ambiguous = 0
-                local_mfe: list[float] = []
-                local_mae: list[float] = []
+                local_extended = local_duplicates = local_qualifying = local_checkpoints = 0
+                local_resolution_mfe: list[float] = []
+                local_resolution_mae: list[float] = []
+                local_full_mfe: list[float] = []
+                local_full_mae: list[float] = []
                 local_buckets = {k: [0, 0, 0] for k in buckets}
                 local_wave_buckets = {k: [0, 0, 0, 0] for k in wave_buckets}
                 local_records: list[WalkSignalRecord] = []
+                local_excluded: list[WalkExcludedRecord] = []
                 try:
                     full = await self.data.walk_history(
                         exchange,
@@ -468,10 +532,28 @@ class ScannerService:
 
                 def evaluate_history():
                     nonlocal local_signals, local_t1, local_invalid, local_unresolved, local_ambiguous
+                    nonlocal local_extended, local_duplicates, local_qualifying, local_checkpoints
                     h1_all = full.hourly_closed.copy()
                     d1_all = full.daily_closed.copy()
                     h1_all["timestamp"] = pd.to_datetime(h1_all["timestamp"], utc=True)
                     d1_all["timestamp"] = pd.to_datetime(d1_all["timestamp"], utc=True)
+                    h1_all = h1_all.sort_values("timestamp").reset_index(drop=True)
+                    d1_all = d1_all.sort_values("timestamp").reset_index(drop=True)
+
+                    h1_end = h1_all["timestamp"] + pd.Timedelta(hours=1)
+                    checkpoint_mask = (
+                        (h1_end >= earliest_checkpoint)
+                        & (h1_end <= latest_checkpoint)
+                        & (h1_end.dt.minute == 0)
+                        & (h1_end.dt.second == 0)
+                        & ((h1_end.dt.hour % 4) == 0)
+                    )
+                    checkpoints = list(pd.DatetimeIndex(h1_end[checkpoint_mask]).unique().sort_values())
+                    local_checkpoints = len(checkpoints)
+
+                    # key -> fresh record index, or None when first qualifying observation
+                    # was already extended and intentionally excluded.
+                    seen: dict[str, int | None] = {}
 
                     for checkpoint in checkpoints:
                         h1_hist = h1_all[(h1_all["timestamp"] + pd.Timedelta(hours=1)) <= checkpoint].copy()
@@ -494,28 +576,63 @@ class ScannerService:
                         if not state.targets or state.strict_origin is None or state.current_price is None:
                             continue
 
-                        local_signals += 1
+                        local_qualifying += 1
+                        key = structure_key(state)
+                        if key in seen:
+                            local_duplicates += 1
+                            record_index = seen[key]
+                            if record_index is not None:
+                                rec = local_records[record_index]
+                                rec.observations += 1
+                                rec.last_seen = checkpoint.isoformat()
+                            continue
+
+                        entry = float(state.current_price)
+                        t1 = float(state.targets[0])
+                        seen[key] = None
+                        if state.status == "EXTENDED" or entry >= t1:
+                            local_extended += 1
+                            local_excluded.append(
+                                WalkExcludedRecord(
+                                    symbol=shown_symbol,
+                                    structure_id=key,
+                                    first_seen=checkpoint.isoformat(),
+                                    wave_type=state.wave_type,
+                                    rating=float(state.rating or 0.0),
+                                    entry=entry,
+                                    t1=t1,
+                                    reason="ALREADY_T1/EXTENDED_AT_FIRST_QUALIFYING_OBSERVATION",
+                                )
+                            )
+                            continue
+
                         bucket = rating_bucket(float(state.rating or 0.0))
-                        local_buckets[bucket][0] += 1
                         wave = state.wave_type if state.wave_type in local_wave_buckets else "W2"
+                        local_signals += 1
+                        local_buckets[bucket][0] += 1
                         local_wave_buckets[wave][0] += 1
 
                         future_end = checkpoint + pd.Timedelta(days=horizon)
                         future = h1_all[(h1_all["timestamp"] >= checkpoint) & (h1_all["timestamp"] < future_end)].copy()
-                        entry = float(state.current_price)
-                        t1 = float(state.targets[0])
                         strict = float(state.strict_origin)
                         outcome = "unresolved"
                         outcome_at: str | None = None
-                        mfe: float | None = None
-                        mae: float | None = None
+                        hours_to_outcome: float | None = None
+                        resolution_highs: list[float] = []
+                        resolution_lows: list[float] = []
+                        mfe_to_resolution: float | None = None
+                        mae_to_resolution: float | None = None
+                        mfe_30d: float | None = None
+                        mae_30d: float | None = None
 
                         if not future.empty:
-                            mfe = (float(future["high"].max()) / entry - 1.0) * 100.0
-                            mae = (float(future["low"].min()) / entry - 1.0) * 100.0
-                            local_mfe.append(mfe)
-                            local_mae.append(mae)
+                            mfe_30d = (float(future["high"].max()) / entry - 1.0) * 100.0
+                            mae_30d = (float(future["low"].min()) / entry - 1.0) * 100.0
+                            local_full_mfe.append(mfe_30d)
+                            local_full_mae.append(mae_30d)
                             for row in future.itertuples(index=False):
+                                resolution_highs.append(float(row.high))
+                                resolution_lows.append(float(row.low))
                                 hit_t1 = float(row.high) >= t1
                                 hit_invalid = float(row.low) < strict
                                 if hit_t1 and hit_invalid:
@@ -530,6 +647,16 @@ class ScannerService:
                                     outcome = "invalid"
                                     outcome_at = pd.Timestamp(row.timestamp).isoformat()
                                     break
+                            if resolution_highs:
+                                mfe_to_resolution = (max(resolution_highs) / entry - 1.0) * 100.0
+                                mae_to_resolution = (min(resolution_lows) / entry - 1.0) * 100.0
+                                local_resolution_mfe.append(mfe_to_resolution)
+                                local_resolution_mae.append(mae_to_resolution)
+                            if outcome_at is not None:
+                                hours_to_outcome = max(
+                                    0.0,
+                                    (pd.Timestamp(outcome_at) - checkpoint).total_seconds() / 3600.0,
+                                )
 
                         if outcome == "t1":
                             local_t1 += 1
@@ -546,45 +673,76 @@ class ScannerService:
                             local_unresolved += 1
                             local_wave_buckets[wave][3] += 1
 
-                        local_records.append(
-                            WalkSignalRecord(
-                                symbol=shown_symbol,
-                                checkpoint=checkpoint.isoformat(),
-                                wave_type=state.wave_type,
-                                rating=float(state.rating or 0.0),
-                                entry=entry,
-                                working_low=state.working_low,
-                                strict_origin=strict,
-                                retrace_depth=state.retrace_depth,
-                                fib_status=state.fib_status,
-                                t1=t1,
-                                outcome=outcome,
-                                outcome_at=outcome_at,
-                                mfe_pct=mfe,
-                                mae_pct=mae,
-                                growth_from_low_pct=state.growth_from_low_pct,
-                                strict_distance_pct=state.strict_distance_pct,
-                            )
+                        record = WalkSignalRecord(
+                            symbol=shown_symbol,
+                            structure_id=key,
+                            first_seen=checkpoint.isoformat(),
+                            last_seen=checkpoint.isoformat(),
+                            observations=1,
+                            wave_type=state.wave_type,
+                            state_status=state.status,
+                            rating=float(state.rating or 0.0),
+                            entry=entry,
+                            origin=state.origin,
+                            impulse_high=state.impulse_high,
+                            working_low=state.working_low,
+                            strict_origin=strict,
+                            parent_w2_low=state.parent_w2_low,
+                            w3_1_high=state.w3_1_high,
+                            retrace_depth=state.retrace_depth,
+                            fib_status=state.fib_status,
+                            fibs=dict(state.fibs),
+                            targets=list(state.targets),
+                            base_zone=state.base_zone,
+                            deep_zone=state.deep_zone,
+                            t1=t1,
+                            outcome=outcome,
+                            outcome_at=outcome_at,
+                            hours_to_outcome=hours_to_outcome,
+                            mfe_to_resolution_pct=mfe_to_resolution,
+                            mae_to_resolution_pct=mae_to_resolution,
+                            mfe_30d_pct=mfe_30d,
+                            mae_30d_pct=mae_30d,
+                            growth_from_low_pct=state.growth_from_low_pct,
+                            strict_distance_pct=state.strict_distance_pct,
+                            liquidity_rank=rank,
+                            last_complete4h_bucket=state.last_complete4h_bucket,
                         )
+                        local_records.append(record)
+                        seen[key] = len(local_records) - 1
 
                 await self._compute(evaluate_history)
 
                 async with aggregate_lock:
                     tested_assets += 1
+                    complete4h_checkpoints = max(complete4h_checkpoints, local_checkpoints)
                     signals += local_signals
                     t1_first += local_t1
                     invalid_first += local_invalid
                     unresolved += local_unresolved
                     ambiguous += local_ambiguous
-                    mfe_values.extend(local_mfe)
-                    mae_values.extend(local_mae)
+                    already_extended += local_extended
+                    duplicate_observations += local_duplicates
+                    resolution_mfe_values.extend(local_resolution_mfe)
+                    resolution_mae_values.extend(local_resolution_mae)
+                    full_mfe_values.extend(local_full_mfe)
+                    full_mae_values.extend(local_full_mae)
                     for key, vals in local_buckets.items():
                         for i in range(3):
                             buckets[key][i] += vals[i]
                     for key, vals in local_wave_buckets.items():
                         for i in range(4):
                             wave_buckets[key][i] += vals[i]
-                    asset_reports[shown_symbol] = WalkAssetReport(shown_symbol, True, None, local_records)
+                    asset_reports[shown_symbol] = WalkAssetReport(
+                        shown_symbol,
+                        True,
+                        None,
+                        local_records,
+                        local_excluded,
+                        local_checkpoints,
+                        local_qualifying,
+                        local_duplicates,
+                    )
 
             await self._map(one_asset, symbols)
             finished = datetime.now(timezone.utc)
@@ -593,17 +751,21 @@ class ScannerService:
                 top_n=len(symbols),
                 assets_requested=len(symbols),
                 assets_tested=tested_assets,
-                checkpoints=count,
-                spacing_days=spacing,
                 horizon_days=horizon,
+                history_days=history_days,
+                complete4h_checkpoints=complete4h_checkpoints,
                 signals=signals,
                 t1_first=t1_first,
                 invalid_first=invalid_first,
                 unresolved=unresolved,
                 ambiguous=ambiguous,
+                already_extended=already_extended,
+                duplicate_observations=duplicate_observations,
                 data_errors=data_errors,
-                median_mfe_pct=float(pd.Series(mfe_values).median()) if mfe_values else None,
-                median_mae_pct=float(pd.Series(mae_values).median()) if mae_values else None,
+                median_mfe_pct=float(pd.Series(resolution_mfe_values).median()) if resolution_mfe_values else None,
+                median_mae_pct=float(pd.Series(resolution_mae_values).median()) if resolution_mae_values else None,
+                median_mfe_30d_pct=float(pd.Series(full_mfe_values).median()) if full_mfe_values else None,
+                median_mae_30d_pct=float(pd.Series(full_mae_values).median()) if full_mae_values else None,
                 rating_buckets={k: tuple(v) for k, v in buckets.items()},
                 started_at=started.isoformat(),
                 finished_at=finished.isoformat(),

@@ -89,30 +89,46 @@ def _near_zone(price: float | None, zone: tuple[float, float] | None) -> bool:
     return low <= price <= high * 1.03
 
 
-def _row_values_flags(state: WaveState, rank: int | None) -> tuple[list[str], list[bool]]:
-    """One source of truth for text and PNG table rows.
+def _inside_zone(price: float | None, zone: tuple[float, float] | None) -> bool:
+    if price is None or not zone:
+        return False
+    low, high = sorted(zone)
+    return low <= price <= high
 
-    Flags mark favorable cells that should be visually emphasized.
+
+def _confirmed_recovery_ratio(fib_status: str) -> float | None:
+    """Return reclaimed Fib ratio only for durable 3/3 COMPLETE4H acceptance."""
+    if "3/3 C4H" not in (fib_status or ""):
+        return None
+    match = re.search(r">\s*\.(\d+)", fib_status)
+    if not match:
+        return None
+    try:
+        return float(f"0.{match.group(1)}")
+    except ValueError:
+        return None
+
+
+def _row_values_flags(state: WaveState, rank: int | None) -> tuple[list[str], list[bool]]:
+    """One source of truth for text and PNG rows.
+
+    v0013 deliberately uses sparse emphasis: bold/green means a genuinely favorable
+    property, not merely a valid field. This keeps the image readable at a glance.
     """
     invalid = state.status in {"INVALID", "RECOUNT", "NO_SETUP", "DATA_INCOMPLETE"}
-    strong = not invalid and state.rating is not None and state.rating >= 8.5
-    fresh = (
+    rating_strong = not invalid and state.rating is not None and state.rating >= 8.5
+    very_fresh = (
         not invalid
         and state.growth_from_low_pct is not None
-        and 0 <= state.growth_from_low_pct <= 7.0
+        and 0 <= state.growth_from_low_pct <= 3.0
     )
-    deep_valid = (
-        not invalid
-        and state.retrace_depth is not None
-        and 0.618 <= state.retrace_depth <= 0.95
-        and (state.strict_distance_pct is None or state.strict_distance_pct >= 1.5)
-    )
-    fib_good = not invalid and state.status in {"RECOVERING", "CONFIRMED"}
-    base_near = not invalid and _near_zone(state.current_price, state.base_zone)
-    deep_near = not invalid and _near_zone(state.current_price, state.deep_zone)
-    target_good = False
+    recovery_ratio = _confirmed_recovery_ratio(state.fib_status)
+    fib_strong = not invalid and recovery_ratio is not None and recovery_ratio <= 0.500
+    base_actionable = not invalid and _inside_zone(state.current_price, state.base_zone)
+    deep_actionable = not invalid and _inside_zone(state.current_price, state.deep_zone)
+    target_strong = False
     if not invalid and state.current_price and state.targets:
-        target_good = state.targets[0] / state.current_price - 1 >= 0.20
+        target_strong = state.targets[0] / state.current_price - 1 >= 0.30
 
     growth = "—" if state.growth_from_low_pct is None else f"{state.growth_from_low_pct:+.1f}%"
     rating = "—" if state.rating is None else f"{state.rating:.1f}"
@@ -131,17 +147,17 @@ def _row_values_flags(state: WaveState, rank: int | None) -> tuple[list[str], li
         _targets(state),
     ]
     flags = [
-        False,
-        strong,
-        strong,
-        fresh,
-        not invalid and state.wave_type in {"W2", "W3-(2)"},
-        deep_valid,
-        fib_good,
-        fresh,
-        base_near,
-        deep_near,
-        target_good,
+        False,              # #
+        False,              # asset name is never highlighted by itself
+        rating_strong,      # rating >= 8.5
+        False,              # raw price is information, not a favorable signal by itself
+        False,              # W2/W3-(2) label alone is not enough for emphasis
+        False,              # working low alone is not enough for emphasis
+        fib_strong,         # durable 3/3 C4H reclaim of .500 or stronger (.382/.236)
+        very_fresh,         # <= 3% from working low
+        base_actionable,    # actually trading inside base zone
+        deep_actionable,    # actually trading inside deep/on-sweep zone
+        target_strong,      # >= 30% to T1
     ]
     return values, flags
 

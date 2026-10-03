@@ -47,7 +47,7 @@ class BotController:
         self.router = Router()
         self.started = time.monotonic()
         self.cooldowns: dict[int, float] = {}
-        # No Telegram account whitelist in v0011. Any chat that talks to the bot can use it
+        # No Telegram account whitelist in v0013. Any chat that talks to the bot can use it
         # and becomes a persisted destination for periodic reports.
         self.report_chats: set[int] = set()
         self.scheduler: DynamicScheduler | None = None
@@ -366,6 +366,7 @@ class BotController:
             caption = (
                 f"🧪 /walk готов за {self._format_duration(result.analysis_seconds)}. "
                 f"10 majors: {result.assets_tested}/{result.assets_requested} · ошибок: {result.data_errors}. "
+                f"Fresh unique: {result.signals} · T1 first: {result.t1_first} · invalid first: {result.invalid_first}. "
                 "Файл — полный материал для полировки детектора."
             )
             if not self.bot:
@@ -563,64 +564,123 @@ class BotController:
         def fnum(v: float | None) -> str:
             return "—" if v is None else f"{v:+.1f}%"
 
+        def zone_text(zone: tuple[float, float] | None) -> str:
+            if not zone:
+                return "—"
+            return f"{_fmt(zone[0])}–{_fmt(zone[1])}"
+
+        def fibs_text(fibs: dict[str, float]) -> str:
+            if not fibs:
+                return "—"
+            return ", ".join(f"{key}={_fmt(value)}" for key, value in sorted(fibs.items()))
+
+        def targets_text(targets: list[float]) -> str:
+            return "—" if not targets else " / ".join(_fmt(value) for value in targets)
+
+        resolved = r.t1_first + r.invalid_first
         lines = [
             f"SENIOR WAVE BOT v{self.cfg.bot_version}",
-            "WALK-FORWARD — 10 LIQUID MAJORS",
+            "WALK-FORWARD — 10 LIQUID MAJORS — DETAILED DETECTOR DIAGNOSTIC",
             f"Биржа: {EXCHANGE_LABELS.get(r.exchange, r.exchange)}",
             "Монеты: BTC, ETH, SOL, BNB, XRP, DOGE, ADA, LINK, LTC, BCH",
             f"Время анализа: {self._format_duration(r.analysis_seconds)}",
             f"Активов: {r.assets_tested}/{r.assets_requested}; ошибок данных: {r.data_errors}",
-            f"Checkpoints: {r.checkpoints} × шаг {r.spacing_days}д; горизонт результата {r.horizon_days}д",
+            f"Историческое окно: {r.history_days}д; шаг проверки: каждый COMPLETE4H; "
+            f"примерно checkpoint/актив: {r.complete4h_checkpoints}; горизонт результата: {r.horizon_days}д",
             "",
-            "ИТОГ",
-            f"Сигналов >= {self.cfg.min_rating:.1f}: {r.signals}",
+            "ИТОГ — ТОЛЬКО УНИКАЛЬНЫЕ СВЕЖИЕ СТРУКТУРЫ",
+            f"Fresh signals >= {self.cfg.min_rating:.1f}: {r.signals}",
             f"T1 раньше strict invalidation: {r.t1_first} ({pct(r.t1_first, r.signals)})",
             f"Strict invalidation раньше T1: {r.invalid_first} ({pct(r.invalid_first, r.signals)})",
-            f"Не разрешились: {r.unresolved}",
+            f"Resolved-only T1 first: {r.t1_first}/{resolved} ({pct(r.t1_first, resolved)})",
+            f"Не разрешились за горизонт: {r.unresolved}",
             f"T1 и invalid в одной 1H свече: {r.ambiguous}",
-            f"Median MFE: {fnum(r.median_mfe_pct)}; Median MAE: {fnum(r.median_mae_pct)}",
+            f"Исключены как уже прошедшие T1 / EXTENDED при первом qualifying observation: {r.already_extended}",
+            f"Повторные наблюдения уже учтённых senior-структур (НЕ считаются новыми сигналами): {r.duplicate_observations}",
+            f"Median MFE до resolution/конца горизонта: {fnum(r.median_mfe_pct)}; "
+            f"Median MAE до resolution/конца горизонта: {fnum(r.median_mae_pct)}",
+            f"Median 30d MFE: {fnum(r.median_mfe_30d_pct)}; Median 30d MAE: {fnum(r.median_mae_30d_pct)}",
             "",
-            "ПО РЕЙТИНГУ",
+            "ПО РЕЙТИНГУ — FRESH UNIQUE SIGNALS",
         ]
         for label, (signals, t1, invalid) in r.rating_buckets.items():
+            bucket_resolved = t1 + invalid
             lines.append(
                 f"{label}: signals={signals}; T1 first={t1} ({pct(t1, signals)}); "
-                f"invalid first={invalid} ({pct(invalid, signals)})"
-            )
-        lines.extend(["", "ПО ТИПУ ВОЛНЫ"] )
-        for wave, (signals, t1, invalid, rest) in r.wave_buckets.items():
-            lines.append(
-                f"{wave}: signals={signals}; T1 first={t1} ({pct(t1, signals)}); "
-                f"invalid first={invalid} ({pct(invalid, signals)}); unresolved/ambiguous={rest}"
+                f"invalid first={invalid} ({pct(invalid, signals)}); "
+                f"resolved-only T1={pct(t1, bucket_resolved)}"
             )
 
-        lines.extend(["", "ПО МОНЕТАМ", "=" * 100])
+        lines.extend(["", "ПО ТИПУ ВОЛНЫ — FRESH UNIQUE SIGNALS"])
+        for wave, (signals, t1, invalid, rest) in r.wave_buckets.items():
+            wave_resolved = t1 + invalid
+            lines.append(
+                f"{wave}: signals={signals}; T1 first={t1} ({pct(t1, signals)}); "
+                f"invalid first={invalid} ({pct(invalid, signals)}); unresolved/ambiguous={rest}; "
+                f"resolved-only T1={pct(t1, wave_resolved)}"
+            )
+
+        lines.extend(["", "ПО МОНЕТАМ — ПОЛНЫЕ ДАННЫЕ ДЛЯ ПОЛИРОВКИ", "=" * 120])
         for asset in r.assets:
             lines.append(f"\n[{asset.symbol}]")
             if not asset.tested:
                 lines.append(f"DATA ERROR: {asset.error or 'unknown'}")
                 continue
-            lines.append(f"Сигналов: {len(asset.signals)}")
+            lines.extend([
+                f"COMPLETE4H checkpoints evaluated: {asset.checkpoints_evaluated}",
+                f"Qualifying observations >= {self.cfg.min_rating:.1f}: {asset.qualifying_observations}",
+                f"Fresh unique signals: {len(asset.signals)}",
+                f"Duplicate observations suppressed: {asset.duplicate_observations}",
+                f"Already-T1/EXTENDED structures excluded: {len(asset.excluded)}",
+            ])
             if not asset.signals:
-                lines.append("Нет qualifying W2/W3-(2) на исторических checkpoints.")
-                continue
+                lines.append("Нет свежих уникальных qualifying W2/W3-(2) в диагностическом окне.")
+
             for idx, sig in enumerate(asset.signals, 1):
                 retrace = "—" if sig.retrace_depth is None else f"{sig.retrace_depth * 100:.2f}%"
                 growth = "—" if sig.growth_from_low_pct is None else f"{sig.growth_from_low_pct:+.2f}%"
                 strict_dist = "—" if sig.strict_distance_pct is None else f"{sig.strict_distance_pct:.2f}%"
+                hours = "—" if sig.hours_to_outcome is None else f"{sig.hours_to_outcome:.1f}ч"
                 lines.extend([
-                    f"  {idx}. checkpoint={sig.checkpoint}",
-                    f"     wave={sig.wave_type}; rating={sig.rating:.1f}; retrace={retrace}; fib={sig.fib_status}",
-                    f"     entry={_fmt(sig.entry)}; working_low={_fmt(sig.working_low)}; strict_origin={_fmt(sig.strict_origin)}; T1={_fmt(sig.t1)}",
-                    f"     growth_from_low={growth}; strict_distance={strict_dist}",
-                    f"     outcome={sig.outcome}; outcome_at={sig.outcome_at or '—'}; MFE={fnum(sig.mfe_pct)}; MAE={fnum(sig.mae_pct)}",
+                    "",
+                    f"  SIGNAL {idx}",
+                    f"    structure_id={sig.structure_id}",
+                    f"    first_seen={sig.first_seen}; last_seen={sig.last_seen}; observations={sig.observations}",
+                    f"    wave={sig.wave_type}; state_status={sig.state_status}; rating={sig.rating:.1f}; liquidity_rank={sig.liquidity_rank or '—'}",
+                    f"    entry={_fmt(sig.entry)}; working_low={_fmt(sig.working_low)}; strict_origin={_fmt(sig.strict_origin)}",
+                    f"    origin={_fmt(sig.origin)}; impulse_high={_fmt(sig.impulse_high)}; "
+                    f"parent_w2_low={_fmt(sig.parent_w2_low)}; w3_1_high={_fmt(sig.w3_1_high)}",
+                    f"    retrace={retrace}; growth_from_low={growth}; strict_distance={strict_dist}",
+                    f"    fib_status={sig.fib_status}; fibs={fibs_text(sig.fibs)}",
+                    f"    base={zone_text(sig.base_zone)}; deep/on-sweep={zone_text(sig.deep_zone)}",
+                    f"    targets={targets_text(sig.targets)}; T1={_fmt(sig.t1)}",
+                    f"    last_complete4h_bucket={sig.last_complete4h_bucket or '—'}",
+                    f"    outcome={sig.outcome}; outcome_at={sig.outcome_at or '—'}; time_to_outcome={hours}",
+                    f"    MFE_to_resolution={fnum(sig.mfe_to_resolution_pct)}; MAE_to_resolution={fnum(sig.mae_to_resolution_pct)}",
+                    f"    MFE_30d={fnum(sig.mfe_30d_pct)}; MAE_30d={fnum(sig.mae_30d_pct)}",
                 ])
+
+            if asset.excluded:
+                lines.append("")
+                lines.append("  ИСКЛЮЧЕННЫЕ КАК НЕСВЕЖИЕ / УЖЕ ПРОШЕДШИЕ T1:")
+                for idx, ex in enumerate(asset.excluded, 1):
+                    lines.append(
+                        f"    {idx}. first_seen={ex.first_seen}; structure_id={ex.structure_id}; "
+                        f"wave={ex.wave_type}; rating={ex.rating:.1f}; entry={_fmt(ex.entry)}; "
+                        f"T1={_fmt(ex.t1)}; reason={ex.reason}"
+                    )
 
         lines.extend([
             "",
-            "ПРИМЕЧАНИЕ",
-            "Это отдельная диагностика детектора. Она не меняет Search/Сопровождение, tracked-set или их таймер.",
-            "Каждый checkpoint использует только свечи, которые были доступны к тому моменту; будущие 1H свечи используются только для оценки результата после сигнала.",
+            "МЕТОДИКА WALK",
+            "1) Проверяются только фиксированные 10 liquid majors; текущий Top-100/200/300 на состав walk не влияет.",
+            "2) История идёт последовательно по каждому завершённому UTC COMPLETE4H, а не по шести редким месячным snapshots.",
+            "3) Одна и та же живущая senior-структура считается сигналом только один раз — при первом свежем qualifying observation.",
+            "4) Если при первом qualifying observation цена уже >= T1 или state=EXTENDED, это не считается успешным fresh signal и попадает в excluded.",
+            "5) Detector на checkpoint видит только свечи, закрытые к этому моменту. Будущие 1H свечи используются только для outcome/MFE/MAE.",
+            "6) MFE/MAE_to_resolution считаются только до первого T1/strict invalidation (или до конца горизонта, если unresolved).",
+            "7) MFE/MAE_30d отдельно показывают всё последующее движение за полный горизонт и не смешиваются с риском пути до исхода.",
+            "8) /walk не меняет Search, Сопровождение, tracked-set или их таймер.",
         ])
         return "\n".join(lines).rstrip() + "\n"
 

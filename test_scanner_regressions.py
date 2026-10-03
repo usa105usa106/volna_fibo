@@ -133,7 +133,7 @@ async def test_manual_lowercase_doge_pol_sol_through_handler_is_state_read_only(
 
 async def test_walk_executes_checkpoints_without_state_or_timer_mutation(cfg, repo):
     cfg = cfg.model_copy(
-        update={"walk_checkpoints": 2, "walk_spacing_days": 1, "walk_horizon_days": 1}
+        update={"walk_history_days": 1, "walk_horizon_days": 1}
     )
     await repo.set_mode("search")
     await repo.mark_report_complete("search", "2026-01-01T00:00:00+00:00")
@@ -157,7 +157,8 @@ async def test_walk_executes_checkpoints_without_state_or_timer_mutation(cfg, re
 
     def detect(snapshot, *args):
         last = snapshot.hourly_closed.timestamp.max() + pd.Timedelta(hours=1)
-        assert last in {now - pd.Timedelta(days=1), now - pd.Timedelta(days=2)}
+        assert now - pd.Timedelta(days=2) <= last <= now - pd.Timedelta(days=1)
+        assert last.hour % 4 == 0
         assert (snapshot.daily_closed.timestamp + pd.Timedelta(days=1)).max() <= last
         assert snapshot.live_price == snapshot.hourly_closed.close.iloc[-1]
         seen.append(last)
@@ -165,7 +166,9 @@ async def test_walk_executes_checkpoints_without_state_or_timer_mutation(cfg, re
 
     scanner.detector = SimpleNamespace(detect=detect)
     result = await scanner.walk_forward()
-    assert result.assets_tested == 100 and len(seen) == 200
+    assert result.assets_tested == 10
+    assert result.complete4h_checkpoints > 0
+    assert len(seen) == result.complete4h_checkpoints * 10
     assert asdict(await repo.get_settings()) == before
     assert (await repo.tracked_states())[0].to_dict() == old
 
@@ -197,3 +200,69 @@ async def test_cpu_work_does_not_block_event_loop_and_is_drained_on_cancel(cfg, 
         release.set()
         await asyncio.gather(task, return_exceptions=True)
     assert finished.is_set() and task.cancelled()
+
+
+async def test_walk_counts_same_living_structure_once_and_tracks_duplicates(cfg, repo):
+    cfg = cfg.model_copy(update={"walk_history_days": 1, "walk_horizon_days": 1})
+    now = pd.Timestamp.now(tz="UTC").floor("h")
+    full = MarketSnapshot(
+        "X",
+        "binance_spot",
+        1,
+        10.5,
+        9,
+        frame(now - pd.Timedelta(days=4), 96),
+        frame(now.floor("D") - pd.Timedelta(days=45), 45, "D"),
+    )
+    data = fake_data()
+    data.walk_history = AsyncMock(return_value=full)
+    scanner = ScannerService(cfg, repo, data)
+
+    stable = state()
+    stable.rating = 8.5
+    stable.current_price = 10.5
+    stable.targets = [24.0]
+    stable.strict_origin = 5.0
+    stable.impulse_start_ts = "2026-01-01T00:00:00+00:00"
+    stable.impulse_high_ts = "2026-01-15T00:00:00+00:00"
+    scanner.detector = SimpleNamespace(detect=lambda *args: stable)
+
+    result = await scanner.walk_forward()
+    assert result.assets_tested == 10
+    assert result.signals == 10  # one unique structure per major, never once per COMPLETE4H
+    assert result.unresolved == 10
+    assert result.duplicate_observations > 0
+    assert all(len(asset.signals) == 1 for asset in result.assets)
+    assert all(asset.duplicate_observations > 0 for asset in result.assets)
+
+
+async def test_walk_excludes_setup_already_beyond_t1_from_fresh_success_stats(cfg, repo):
+    cfg = cfg.model_copy(update={"walk_history_days": 1, "walk_horizon_days": 1})
+    now = pd.Timestamp.now(tz="UTC").floor("h")
+    full = MarketSnapshot(
+        "X",
+        "binance_spot",
+        1,
+        10.5,
+        9,
+        frame(now - pd.Timedelta(days=4), 96),
+        frame(now.floor("D") - pd.Timedelta(days=45), 45, "D"),
+    )
+    data = fake_data()
+    data.walk_history = AsyncMock(return_value=full)
+    scanner = ScannerService(cfg, repo, data)
+
+    extended = state()
+    extended.rating = 8.5
+    extended.current_price = 10.5
+    extended.targets = [10.0]
+    extended.strict_origin = 5.0
+    extended.impulse_start_ts = "2026-01-01T00:00:00+00:00"
+    extended.impulse_high_ts = "2026-01-15T00:00:00+00:00"
+    scanner.detector = SimpleNamespace(detect=lambda *args: extended)
+
+    result = await scanner.walk_forward()
+    assert result.signals == 0
+    assert result.t1_first == 0
+    assert result.already_extended == 10
+    assert all(len(asset.excluded) == 1 for asset in result.assets)

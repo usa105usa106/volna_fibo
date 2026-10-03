@@ -68,7 +68,7 @@ def test_split_does_not_drop_or_inject_characters():
         ("TELEGRAM_RETRY_BASE_DELAY_SECONDS", float("nan")),
         ("LOOKBACK_1H_DAYS", 0),
         ("LOOKBACK_1D_DAYS", -1),
-        ("WALK_SPACING_DAYS", 0),
+        ("WALK_HISTORY_DAYS", 0),
         ("WALK_HORIZON_DAYS", -1),
         ("MIN_RATING", float("inf")),
         ("ACTION_COOLDOWN_SECONDS", -1),

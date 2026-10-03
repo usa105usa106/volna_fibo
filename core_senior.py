@@ -24,7 +24,7 @@ class DetectorConfig:
     min_w2_retrace: float = 0.50
     max_w2_retrace: float = 0.995
     min_nested_impulse_pct: float = 0.10
-    min_nested_retrace: float = 0.50
+    min_nested_retrace: float = 0.20
     max_nested_retrace: float = 0.97
     max_w1_age_days: int = 180
 
@@ -117,11 +117,29 @@ def _fib_status(close: float, fibs: dict[str, float], recent_closes: Iterable[fl
     return "< .950", 0
 
 
-def _zones(origin: float, high: float, strict_origin: float) -> tuple[tuple[float, float], tuple[float, float]]:
-    fibs = _fib_prices(origin, high)
-    base = tuple(sorted((fibs["0.886"], fibs["0.786"])))
-    deep_low = max(strict_origin * 1.0005, fibs["0.950"])
-    deep = tuple(sorted((deep_low, fibs["0.886"])))
+def _zones(working_low: float, high: float, strict_origin: float) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Execution zones around the *active* senior correction low.
+
+    The old implementation projected .786-.950 of the entire parent impulse.  Once
+    W2/W3-(2) had already printed and price started recovering this pushed entry
+    zones absurdly far below the live senior low (the BCH failure was the clearest
+    example).  The working table used in the parquet workflow instead treats the
+    confirmed working low as the execution anchor and the first 23.6% recovery of
+    the correction as the normal retest area.
+
+    Base: working low -> 23.6% recovery toward the impulse high.
+    Sweep: a narrow 5% correction-amplitude buffer below the working low, never
+    through strict origin.
+    """
+    correction = max(0.0, high - working_low)
+    base_upper = working_low + 0.236 * correction
+    base = tuple(sorted((working_low, base_upper)))
+
+    # A sweep zone is deliberately narrow.  It is execution context only and must
+    # not recreate the old deep-parent-Fib zones near strict origin.
+    sweep_buffer = 0.05 * correction
+    deep_low = max(strict_origin * 1.0005, working_low - sweep_buffer)
+    deep = tuple(sorted((deep_low, working_low)))
     return base, deep
 
 
@@ -137,53 +155,104 @@ def _rating(
     liquidity_rank: int | None,
     top_n: int,
     wave_type: str,
+    t1_upside_pct: float | None = None,
 ) -> float:
+    """Opportunity score for an active senior setup.
+
+    This deliberately scores *current asymmetry*, not coin quality.  The previous
+    score over-weighted deep parent retracement and ignored projected upside, which
+    made a mature global W2 outrank a fresh nested W3-(2).  That is the opposite of
+    the parquet workflow where a newly formed, strict-valid W3-(2) close to its low
+    with large T1 room is usually the premium setup.
+    """
     score = 2.0  # valid senior structure
 
-    if 0.618 <= retrace <= 0.886:
-        score += 2.5
-    elif 0.886 < retrace <= 0.97:
-        score += 2.3
-    elif 0.50 <= retrace < 0.618:
-        score += 1.8
-    else:
-        score += 1.3
-
-    if growth_pct <= 3:
-        score += 2.0
-    elif growth_pct <= 7:
-        score += 1.6
-    elif growth_pct <= 12:
-        score += 1.0
-    elif growth_pct <= 20:
-        score += 0.4
-
-    if "> .236" in fib_status:
-        score += 1.4
-    elif "> .382" in fib_status:
+    # Degree/progression.  A valid nested W3-(2) is closer to the main W3 expansion
+    # and gets a meaningful, but not overriding, premium.
+    if wave_type == "W3-(2)":
         score += 1.2
-    elif "> .500" in fib_status or "> .5" in fib_status:
-        score += 0.9
-    elif "> .618" in fib_status:
-        score += 0.6
-    elif "> .705" in fib_status or "> .786" in fib_status:
-        score += 0.3
+        if 0.20 <= retrace < 0.382:
+            score += 0.8
+        elif retrace < 0.618:
+            score += 1.1
+        elif retrace <= 0.886:
+            score += 1.3
+        elif retrace <= 0.97:
+            score += 1.0
+        else:
+            score += 0.5
+    else:
+        score += 0.8
+        if 0.618 <= retrace <= 0.886:
+            score += 1.4
+        elif 0.886 < retrace <= 0.97:
+            score += 1.2
+        elif 0.50 <= retrace < 0.618:
+            score += 1.0
+        else:
+            score += 0.5
 
+    # Freshness to the confirmed working low.
+    if growth_pct <= 3:
+        score += 1.8
+    elif growth_pct <= 6:
+        score += 1.6
+    elif growth_pct <= 10:
+        score += 1.1
+    elif growth_pct <= 15:
+        score += 0.6
+    elif growth_pct <= 20:
+        score += 0.2
+
+    # Recovery quality on COMPLETE4H.  The level matters, but persistence matters
+    # too: 3/3 C4H is stronger than a one-bucket reclaim.
+    recovery = 0.0
+    for marker, value in (("> .236", 1.6), ("> .382", 1.45), ("> .500", 1.2),
+                          ("> .5", 1.2), ("> .618", 0.9), ("> .705", 0.65),
+                          ("> .786", 0.55), ("> .886", 0.35), ("> .950", 0.2)):
+        if marker in fib_status:
+            recovery = value
+            break
+    if "3/3 C4H" in fib_status:
+        recovery += 0.15
+    elif "1/3 C4H" in fib_status:
+        recovery -= 0.15
+    score += max(0.0, recovery)
+
+    # Convexity: room to the first senior target is a core part of opportunity.
+    if t1_upside_pct is not None:
+        if t1_upside_pct >= 25:
+            score += 1.5
+        elif t1_upside_pct >= 18:
+            score += 1.3
+        elif t1_upside_pct >= 12:
+            score += 1.0
+        elif t1_upside_pct >= 8:
+            score += 0.7
+        elif t1_upside_pct >= 4:
+            score += 0.3
+        elif t1_upside_pct <= 0:
+            score -= 1.0
+
+    # Liquidity/execution quality remains a modest tie-breaker, never an override.
     if liquidity_rank is None:
         score += 0.4
     else:
-        score += max(0.2, 1.0 - (liquidity_rank - 1) / max(top_n, 1) * 0.8)
+        frac = (liquidity_rank - 1) / max(top_n, 1)
+        score += max(0.25, 0.6 - frac * 0.35)
 
-    if wave_type == "W3-(2)":
-        score += 0.3
-
+    # A low sitting directly on strict origin is fragile even if everything else is
+    # attractive.
     if strict_distance_pct < 0.75:
-        score -= 1.0
+        score -= 1.2
     elif strict_distance_pct < 1.5:
-        score -= 0.4
+        score -= 0.6
+    elif strict_distance_pct < 3.0:
+        score -= 0.2
 
+    # Late structures remain in accompaniment but are poor fresh entries.
     if growth_pct > 20:
-        score -= min(1.5, (growth_pct - 20) / 20)
+        score -= min(2.0, 0.5 + (growth_pct - 20) / 20)
 
     return round(max(0.0, min(10.0, score)), 1)
 
@@ -412,9 +481,13 @@ class SeniorWaveDetector:
         status, _ = _fib_status(last_close, fibs, h4["close"].tail(3).tolist())
         growth = (live / working_low - 1) * 100 if working_low else math.nan
         strict_distance = (working_low / strict_origin - 1) * 100 if strict_origin else math.nan
-        rating = _rating(retrace, growth, strict_distance, status, liquidity_rank, top_n, wave_type)
-        base, deep = _zones(origin, impulse_high, strict_origin)
         impulse_length = impulse_high - origin
+        targets = _targets(working_low, impulse_length)
+        t1_upside = ((targets[0] / live) - 1) * 100 if targets and live > 0 else None
+        rating = _rating(
+            retrace, growth, strict_distance, status, liquidity_rank, top_n, wave_type, t1_upside
+        )
+        base, deep = _zones(working_low, impulse_high, strict_origin)
         now = datetime.now(timezone.utc).isoformat()
         return WaveState(
             symbol=snapshot.symbol,
@@ -435,7 +508,7 @@ class SeniorWaveDetector:
             retrace_depth=retrace,
             fibs=fibs,
             fib_status=status,
-            targets=_targets(working_low, impulse_length),
+            targets=targets,
             base_zone=base,
             deep_zone=deep,
             current_price=live,
@@ -535,6 +608,25 @@ class SeniorWaveDetector:
             previous.updated_at = now
             return previous
 
+        # A saved global W2 is allowed to progress into a nested W3-(2) on the *same*
+        # symbol.  Accompaniment must not be frozen at the degree found on day one.
+        # We still do not discover any new symbols here; this is only a same-parent
+        # hierarchy upgrade after COMPLETE4H confirms W3-(1) and its correction.
+        if previous.wave_type == "W2" and previous.working_low is not None:
+            promoted = self.detect(snapshot, previous.liquidity_rank, top_n)
+            if (
+                promoted is not None
+                and promoted.wave_type == "W3-(2)"
+                and promoted.parent_w2_low is not None
+                and math.isclose(
+                    promoted.parent_w2_low, previous.working_low, rel_tol=0.003, abs_tol=1e-12
+                )
+            ):
+                promoted.is_control = previous.is_control
+                promoted.created_at = previous.created_at or promoted.created_at
+                promoted.last_event = "PROMOTED W2 → W3-(2)"
+                return promoted
+
         last_seen = pd.Timestamp(previous.last_complete4h_bucket) if previous.last_complete4h_bucket else None
         if last_seen is not None:
             last_seen = last_seen.tz_localize("UTC") if last_seen.tzinfo is None else last_seen.tz_convert("UTC")
@@ -578,7 +670,12 @@ class SeniorWaveDetector:
         previous.growth_from_low_pct = (previous.current_price / previous.working_low - 1) * 100
         previous.strict_distance_pct = (previous.working_low / strict - 1) * 100
         previous.targets = _targets(previous.working_low, length)
-        previous.base_zone, previous.deep_zone = _zones(origin, high, strict)
+        previous.base_zone, previous.deep_zone = _zones(previous.working_low, high, strict)
+        t1_upside = (
+            (previous.targets[0] / previous.current_price - 1) * 100
+            if previous.targets and previous.current_price and previous.current_price > 0
+            else None
+        )
         previous.rating = _rating(
             previous.retrace_depth or 0.0,
             previous.growth_from_low_pct,
@@ -587,6 +684,7 @@ class SeniorWaveDetector:
             previous.liquidity_rank,
             top_n,
             previous.wave_type,
+            t1_upside,
         )
         previous.status = _status_from_state(previous.growth_from_low_pct, previous.fib_status)  # type: ignore[assignment]
         previous.last_event = "RE-ANCHOR COMPLETE4H" if reanchored else "UPDATED"
