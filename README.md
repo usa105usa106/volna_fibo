@@ -1,4 +1,4 @@
-# Telegram Senior Wave Scanner v0014 — flat GitHub edition
+# Telegram Senior Wave Scanner v0015 — flat GitHub edition
 
 Все файлы проекта лежат **в корне репозитория**, без `app/`, `tests/` и других вложенных папок.
 
@@ -18,22 +18,23 @@
 
 Можно написать `DOGE` или `DOGE,POL,SOL` — это одноразовый fresh-анализ только указанных тикеров.
 
-## v0014: wave lifecycle + target-anchor fix
+## v0015: hierarchy repair after the v0014 regression
 
-v0014 исправляет фундаментальную ошибку жизненного цикла Elliott-count, найденную подробным `/walk` и ручной parquet-разметкой:
+v0015 отменяет ошибочное правило v0014, из-за которого валидная W3-(2) исчезала после пробоя W3-(1) high. Именно поэтому BCH стал `NO_SETUP`, а GRAM продолжал печататься как W2.
 
-- **one parent W2 = one senior W3-(2)**. Higher highs до первой senior-коррекции расширяют тот же W3-(1), а не создают новые W3-(1);
-- после первого qualifying W3-(2) и последующего COMPLETE4H acceptance выше locked W3-(1) эта `(2)` consumed и больше никогда не создаётся заново от того же parent;
-- global W2 lock'ится после COMPLETE4H acceptance выше W1 high и больше не re-anchor'ится более поздним W3/W4 low;
-- fresh detector больше не выбирает «самый новый локальный W2» раньше всё ещё активной senior W3-(2);
-- targets привязаны к locked impulse и больше не уезжают вслед за последующими higher highs.
+Новая логика:
+
+- nested W3-(1) должен быть senior по масштабу, поэтому микро-4H swings не получают глобальные Elliott labels;
+- после формирования W3-(2) её W3-(1) high фиксируется как projection anchor; последующие higher highs его не двигают;
+- W3-(2) **не исчезает** после acceptance выше W3-(1). Новый lower COMPLETE4H выше strict origin может re-anchor рабочий W3-(2) low, а targets пересчитываются по прежнему frozen impulse;
+- если геометрический новый «global W1» стартует от уже известного parent W2, он автоматически трактуется как W3-(1), а коррекция как W3-(2). Это исправляет GRAM/USOIL-class mislabel;
+- global W2 после acceptance W1 high больше не может переписываться поздним W3/W4 pullback;
+- crypto W3-(2) rating 9.x теперь требует действительно сильной COMPLETE4H recovery, а не просто nested label и красивую convexity.
 
 Reference regressions из пользовательской parquet-разметки:
 
 - **BCH:** `212.90 -> 317.70 -> 296.10` = W3-(2), targets `400.90 / 465.6664 / 570.4664 / 740.0328`, reference rating `8.8`;
-- **GRAM:** `1.286 -> 1.740 -> 1.460` = W3-(2), targets `1.914 / 2.194572 / 2.648572 / 3.383144`.
-
-Shallow `20–38.2%` W3-(2) остаётся допустимой, но её rating-premium уменьшен: label сам по себе больше не делает setup `9.x`. XAU/USOIL без crypto rank трактуются как высоколиквидные controls, а не как неизвестная ликвидность.
+- **GRAM:** `1.286 -> 1.740 -> 1.460` = W3-(2), targets `1.914 / 2.194572 / 2.648572 / 3.383144`, reference rating `8.4`.
 
 Search, Сопровождение и ручной анализ по-прежнему присылают PNG-таблицу + полный `.txt`; sparse bold/highlight и отдельный control-block XAU/USOIL сохранены.
 
@@ -51,7 +52,7 @@ Search каждый раз скачивает полную свежую исто
 
 Интервал следующего автоматического запуска отсчитывается **после успешной выдачи отчёта**, а не от начала расчёта.
 
-## /walk v0014 — диагностический стенд для полировки детектора
+## /walk v0015 — диагностический стенд для полировки детектора
 
 `/walk` не использует текущий Top-100/200/300 как набор анализа и всегда проверяет фиксированные десять ликвидных монет:
 
@@ -101,13 +102,13 @@ BOT_TOKEN=1234567890:telegram_token_here
 - время отклика;
 - uptime;
 - RSS memory;
-- `Версия: 0014`.
+- `Версия: 0015`.
 
 ## Docker
 
 ```bash
-docker build -t senior-wave-bot:0014 .
-docker run --rm -e BOT_TOKEN='...' -v senior_wave_data:/data senior-wave-bot:0014
+docker build -t senior-wave-bot:0015 .
+docker run --rm -e BOT_TOKEN='...' -v senior_wave_data:/data senior-wave-bot:0015
 ```
 
 Docker устанавливает `fonts-dejavu-core` для кириллицы в PNG-таблицах и locked Python dependencies из `requirements.lock.txt`.
@@ -119,4 +120,4 @@ python -m compileall -q .
 python -m pytest -q
 ```
 
-Для полного pytest нужны dev/runtime dependencies. v0014 добавляет regressions на BCH-like shallow nested W3-(2), active-low execution zones, convexity-aware rating, W2→W3-(2) promotion, sparse highlighting и detailed walk без двойного учёта одной senior-структуры.
+Для полного pytest нужны dev/runtime dependencies. v0015 добавляет regressions на BCH-like shallow nested W3-(2), active-low execution zones, convexity-aware rating, W2→W3-(2) promotion, sparse highlighting и detailed walk без двойного учёта одной senior-структуры.

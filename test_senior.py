@@ -661,9 +661,9 @@ def test_no_yahoo_commodity_proxy_remains_in_runtime_source():
     assert "query1.finance.yahoo.com" not in joined
 
 
-def test_version_0014_is_default():
+def test_version_0015_is_default():
     cfg = Settings(BOT_TOKEN="test")
-    assert cfg.bot_version == "0014"
+    assert cfg.bot_version == "0015"
     assert cfg.default_top_n == 100
 
 
@@ -790,7 +790,7 @@ def test_readme_and_runtime_have_no_stale_v0007_markers():
     files = [root / "README.md", root / ".env.example", root / "Dockerfile"]
     joined = "\n".join(p.read_text() for p in files)
     assert "0007" not in joined
-    assert "0014" in joined
+    assert "0015" in joined
 
 
 def test_tracking_bad_fresh_data_is_report_only_and_not_persisted_source_contract():

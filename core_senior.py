@@ -24,6 +24,10 @@ class DetectorConfig:
     min_w2_retrace: float = 0.50
     max_w2_retrace: float = 0.995
     min_nested_impulse_pct: float = 0.10
+    # Nested W3-(1) must be senior relative to its parent W1. This blocks tiny
+    # 4H subwaves from stealing the W3-(2) label while still allowing BTC/ETH
+    # senior impulses that are modest in percentage terms.
+    min_nested_parent_impulse_ratio: float = 0.30
     min_nested_retrace: float = 0.20
     max_nested_retrace: float = 0.97
     max_w1_age_days: int = 180
@@ -259,6 +263,21 @@ def _rating(
     if growth_pct > 20:
         score -= min(2.0, 0.5 + (growth_pct - 20) / 20)
 
+    # Calibration from the parquet workflow: a crypto W3-(2) does not deserve 9.x
+    # merely because it is nested and close to its low. Durable recovery is mandatory.
+    # This is intentionally a cap (not a bonus): it preserves convexity information
+    # while stopping weak-recovery structures from outranking cleaner setups.
+    if wave_type == "W3-(2)" and liquidity_rank is not None:
+        if "1/3 C4H" in fib_status:
+            score = min(score, 8.5)
+        elif "2/3 C4H" in fib_status:
+            score = min(score, 8.8)
+        elif "3/3 C4H" in fib_status:
+            if any(marker in fib_status for marker in ("> .618", "> .705", "> .786", "> .886", "> .950")):
+                score = min(score, 8.4)
+            elif "> .500" in fib_status or "> .5" in fib_status:
+                score = min(score, 8.9)
+
     return round(max(0.0, min(10.0, score)), 1)
 
 
@@ -366,6 +385,92 @@ class SeniorWaveDetector:
                 )
         return result
 
+    @staticmethod
+    def _same_level(a: float | None, b: float | None, *, rel: float = 0.015) -> bool:
+        if a is None or b is None:
+            return False
+        scale = max(abs(float(a)), abs(float(b)), 1e-12)
+        return abs(float(a) - float(b)) / scale <= rel
+
+    def _nested_impulse_is_senior(self, high: float, g: dict) -> bool:
+        """Reject micro 4H W3-(1) candidates inside an otherwise senior parent.
+
+        The percentage floor alone was far too permissive for volatile alts: a +10%
+        local leg could become "W3-(1)" even when the parent W1 was several times
+        larger.  The parquet workflow compares degrees, so we also require the nested
+        impulse to be meaningful versus the parent W1 amplitude.
+        """
+        parent_low = float(g["w2_low"])
+        nested_len = float(high) - parent_low
+        if nested_len <= 0 or nested_len / parent_low < self.cfg.min_nested_impulse_pct:
+            return False
+        parent_origin = g.get("origin")
+        parent_high = g.get("high")
+        if parent_origin is None or parent_high is None:
+            return True
+        parent_len = float(parent_high) - float(parent_origin)
+        if parent_len <= 0:
+            return True
+        return nested_len >= self.cfg.min_nested_parent_impulse_ratio * parent_len
+
+    def _lineage_nested(self, h4: pd.DataFrame, parent: dict, globals_: list[dict]) -> dict | None:
+        """Promote a later 'global W2' candidate to W3-(2) when its origin is the parent W2.
+
+        This is the exact hierarchy error behind GRAM: 1.286 -> 1.740 -> 1.460 was
+        geometrically detected, but the second leg was labelled a brand-new global W2.
+        If a candidate W1 starts from an already-known senior W2, it is W3-(1), and its
+        correction belongs to nested W3-(2).
+        """
+        parent_low = float(parent["w2_low"])
+        parent_ts = pd.Timestamp(parent["w2_ts"])
+        children: list[dict] = []
+        for child in globals_:
+            if child is parent:
+                continue
+            if not self._same_level(child.get("origin"), parent_low):
+                continue
+            high_ts = pd.Timestamp(child["high_ts"])
+            low_ts = pd.Timestamp(child["w2_ts"])
+            if high_ts <= parent_ts or low_ts <= high_ts:
+                continue
+            high = float(child["high"])
+            if high <= parent_low:
+                continue
+            retrace = (high - float(child["w2_low"])) / (high - parent_low)
+            if not (self.cfg.min_nested_retrace <= retrace <= self.cfg.max_nested_retrace):
+                continue
+            children.append(child)
+        if not children:
+            return None
+
+        # Freeze the first *senior* W3-(1) high. Later higher highs are W3 progress,
+        # not a reason to move the projection anchor. The working W3-(2) low may still
+        # re-anchor lower on later COMPLETE4H candles while strict origin remains intact.
+        children.sort(key=lambda c: pd.Timestamp(c["high_ts"]))
+        child = children[0]
+        high = float(child["high"])
+        high_ts = pd.Timestamp(child["high_ts"])
+        tail = h4[h4["timestamp"] > high_ts]
+        if tail.empty:
+            return None
+        if float(tail["low"].min()) <= parent_low:
+            return None
+        low_idx = tail["low"].idxmin()
+        low = float(h4.at[low_idx, "low"])
+        low_ts = h4.at[low_idx, "timestamp"]
+        retrace = (high - low) / (high - parent_low)
+        if not (self.cfg.min_nested_retrace <= retrace <= self.cfg.max_nested_retrace):
+            return None
+        return {
+            "origin": parent_low,
+            "high": high,
+            "high_ts": high_ts,
+            "low": low,
+            "low_ts": low_ts,
+            "retrace": retrace,
+            "source": "GLOBAL_LINEAGE",
+        }
+
     def detect(self, snapshot: MarketSnapshot, liquidity_rank: int | None, top_n: int) -> WaveState | None:
         daily = snapshot.daily_closed.copy()
         h4 = complete4h(snapshot.hourly_closed)
@@ -380,14 +485,15 @@ class SeniorWaveDetector:
         if not global_candidates:
             return None
 
-        # Evaluate every senior parent.  The old code picked the *latest* W2 first and
-        # only then asked whether it had a W3-(2).  That is why an active older senior
-        # W3-(2) (GRAM/BCH/USOIL class of failure) was overwritten by a newer local W2.
-        # Current active W3-(2) has structural priority; an unconsumed W2 is next.
+        # A valid nested W3-(2) has hierarchy priority over a newer local geometry
+        # that merely looks like another global W2. Within the same degree, prefer the
+        # most recent senior parent; parent amplitude is only a final tie-breaker.
         ranked_states: list[tuple[tuple[float, float, float], WaveState]] = []
         for g in global_candidates:
-            nested = self._detect_nested(h4, g)
-            if nested is not None and not nested.get("consumed", False):
+            nested = self._lineage_nested(h4, g, global_candidates)
+            if nested is None:
+                nested = self._detect_nested(h4, g)
+            if nested is not None:
                 state = self._build_state(
                     snapshot=snapshot,
                     wave_type="W3-(2)",
@@ -409,16 +515,14 @@ class SeniorWaveDetector:
                     is_control=snapshot.symbol in {"XAU", "USOIL"},
                 )
                 if state is not None:
-                    # Senior parent amplitude is a tie-breaker only.  Freshness/rating
-                    # must not be allowed to turn a smaller child count into the parent.
                     ranked_states.append(
-                        ((3.0, float(g.get("impulse_pct", 0.0)), pd.Timestamp(g["w2_ts"]).timestamp()), state)
+                        ((3.0, pd.Timestamp(g["w2_ts"]).timestamp(), float(g.get("impulse_pct", 0.0))), state)
                     )
                 continue
 
-            # Once W1 high has been accepted back above, W2 is history: if the first
-            # senior W3-(2) has not formed (or is already consumed), do NOT fall back
-            # to calling the old correction "current W2".
+            # Once W1 high has accepted above, the old global W2 is no longer the
+            # developing wave. Keep it out of fresh Search unless a nested W3-(2) can
+            # be identified. This prevents late W3/W4 price action from becoming W2.
             if g.get("w2_locked", False):
                 continue
 
@@ -444,7 +548,7 @@ class SeniorWaveDetector:
             )
             if state is not None:
                 ranked_states.append(
-                    ((2.0, float(g.get("impulse_pct", 0.0)), pd.Timestamp(g["w2_ts"]).timestamp()), state)
+                    ((2.0, pd.Timestamp(g["w2_ts"]).timestamp(), float(g.get("impulse_pct", 0.0))), state)
                 )
 
         if not ranked_states:
@@ -453,87 +557,80 @@ class SeniorWaveDetector:
         return ranked_states[0][1]
 
     def _detect_nested(self, h4: pd.DataFrame, g: dict) -> dict | None:
-        """Return the *first senior* W3-(2) belonging to one parent W2.
+        """Detect one senior W3-(1) and keep its W3-(2) anchor alive.
 
-        Higher highs before a qualifying pullback merely extend W3-(1); they do not
-        create a new W3-(1).  After a qualifying W3-(2) is followed by a COMPLETE4H
-        close above its W3-(1) high, that W3-(2) is consumed and this parent may never
-        manufacture another W3-(2).  This is the lifecycle rule missing in the previous release.
+        The first *degree-significant* W3-(1) high is frozen once it produces a
+        qualifying senior correction. Price may later trade above that high; this does
+        NOT delete the W3-(2) or move the W3-(1) anchor. A later lower COMPLETE4H low
+        above parent W2 simply re-anchors the same W3-(2), matching the parquet workflow.
         """
         after_w2 = h4[h4["timestamp"] > g["w2_ts"]].copy()
         if len(after_w2) < 8:
             return None
         high_mask = _pivot_mask(after_w2["high"], self.cfg.fourh_pivot_window, "high")
-        pivot_indices = list(after_w2.index[high_mask.fillna(False)])
-        if not pivot_indices:
+        pivots = [idx for idx in after_w2.index[high_mask.fillna(False)] if self._nested_impulse_is_senior(float(h4.at[idx, "high"]), g)]
+        if not pivots:
             return None
 
-        candidate_high: float | None = None
-        candidate_high_ts = None
-
-        def finalize(high: float, high_ts) -> dict | None:
-            tail = h4[h4["timestamp"] > high_ts]
-            if len(tail) < 2:
-                return None
-            first_accept = tail[tail["close"] > high]
-            consumed = not first_accept.empty
-            breakout_ts = first_accept["timestamp"].iloc[0] if consumed else None
-            correction = tail if breakout_ts is None else tail[tail["timestamp"] < breakout_ts]
-            if correction.empty:
-                return None
-            low_idx = correction["low"].idxmin()
-            low = float(h4.at[low_idx, "low"])
-            low_ts = h4.at[low_idx, "timestamp"]
-            length = high - g["w2_low"]
-            if length <= 0 or low <= g["w2_low"]:
-                return None
-            retrace = (high - low) / length
-            if not (self.cfg.min_nested_retrace <= retrace <= self.cfg.max_nested_retrace):
-                return None
-            return {
-                "origin": g["w2_low"],
-                "high": high,
-                "high_ts": high_ts,
-                "low": low,
-                "low_ts": low_ts,
-                "retrace": retrace,
-                "consumed": consumed,
-                "breakout_ts": breakout_ts,
-            }
-
-        for idx in pivot_indices:
+        frozen_high: float | None = None
+        frozen_high_ts = None
+        for pos, idx in enumerate(pivots):
             high = float(h4.at[idx, "high"])
             high_ts = h4.at[idx, "timestamp"]
-            if high / g["w2_low"] - 1 < self.cfg.min_nested_impulse_pct:
+            next_ts = h4["timestamp"].iloc[-1] + pd.Timedelta(hours=4)
+            for later_idx in pivots[pos + 1:]:
+                if float(h4.at[later_idx, "high"]) > high:
+                    next_ts = h4.at[later_idx, "timestamp"]
+                    break
+            segment = h4[(h4["timestamp"] > high_ts) & (h4["timestamp"] < next_ts)]
+            if len(segment) < 2:
                 continue
-            if candidate_high is None:
-                candidate_high = high
-                candidate_high_ts = high_ts
+            seg_low = float(segment["low"].min())
+            length = high - float(g["w2_low"])
+            if length <= 0 or seg_low <= float(g["w2_low"]):
                 continue
-            if high <= candidate_high:
-                continue
+            retrace = (high - seg_low) / length
+            if self.cfg.min_nested_retrace <= retrace <= self.cfg.max_nested_retrace:
+                frozen_high = high
+                frozen_high_ts = high_ts
+                break
 
-            # Before accepting a new higher W3-(1) high, check whether the old high
-            # had already produced a senior correction.  If yes, lifecycle is locked.
-            between = h4[
-                (h4["timestamp"] > candidate_high_ts)
-                & (h4["timestamp"] < high_ts)
-            ]
-            if not between.empty:
-                low = float(between["low"].min())
-                retrace = (candidate_high - low) / (candidate_high - g["w2_low"])
-                if self.cfg.min_nested_retrace <= retrace <= self.cfg.max_nested_retrace:
-                    locked = finalize(candidate_high, candidate_high_ts)
-                    if locked is not None:
-                        return locked
-
-            # No senior W3-(2) yet: the impulse simply extended to a new high.
-            candidate_high = high
-            candidate_high_ts = high_ts
-
-        if candidate_high is None:
+        # Current high can still be the first senior W3-(1) if no later pivot exists yet.
+        if frozen_high is None:
+            idx = pivots[-1]
+            high = float(h4.at[idx, "high"])
+            high_ts = h4.at[idx, "timestamp"]
+            tail = h4[h4["timestamp"] > high_ts]
+            if len(tail) >= 2:
+                low = float(tail["low"].min())
+                length = high - float(g["w2_low"])
+                if length > 0 and low > float(g["w2_low"]):
+                    retrace = (high - low) / length
+                    if self.cfg.min_nested_retrace <= retrace <= self.cfg.max_nested_retrace:
+                        frozen_high = high
+                        frozen_high_ts = high_ts
+        if frozen_high is None or frozen_high_ts is None:
             return None
-        return finalize(candidate_high, candidate_high_ts)
+
+        tail = h4[h4["timestamp"] > frozen_high_ts]
+        if tail.empty or float(tail["low"].min()) <= float(g["w2_low"]):
+            return None
+        low_idx = tail["low"].idxmin()
+        working_low = float(h4.at[low_idx, "low"])
+        working_low_ts = h4.at[low_idx, "timestamp"]
+        length = frozen_high - float(g["w2_low"])
+        retrace = (frozen_high - working_low) / length
+        if not (self.cfg.min_nested_retrace <= retrace <= self.cfg.max_nested_retrace):
+            return None
+        return {
+            "origin": float(g["w2_low"]),
+            "high": frozen_high,
+            "high_ts": frozen_high_ts,
+            "low": working_low,
+            "low_ts": working_low_ts,
+            "retrace": retrace,
+            "source": "H4_HIERARCHY",
+        }
 
     def _build_state(
         self,
@@ -737,24 +834,26 @@ class SeniorWaveDetector:
             previous.current_price = snapshot.live_price
             previous.updated_at = now
             return previous
-        # Once the relevant impulse high has been accepted back above, the correction
-        # is locked.  Later W3/W4 pullbacks must never re-anchor an already completed
-        # W2 or W3-(2) (the previous lifecycle bug).
-        structure_consumed = False
-        lock_level = previous.w3_1_high if previous.wave_type == "W3-(2)" else previous.impulse_high
-        lock_from_raw = previous.working_low_ts or previous.impulse_high_ts
-        if lock_level is not None and lock_from_raw:
-            lock_from = pd.Timestamp(lock_from_raw)
-            if lock_from.tzinfo is None:
-                lock_from = lock_from.tz_localize("UTC")
-            else:
-                lock_from = lock_from.tz_convert("UTC")
-            structure_consumed = bool(
-                not h4[(h4["timestamp"] > lock_from) & (h4["close"] > float(lock_level))].empty
-            )
+        # Global W2 stops re-anchoring after W1 high is accepted: at that point the
+        # detector should promote the same symbol into W3-(2). A nested W3-(2), however,
+        # keeps its W3-(1) high frozen and MAY re-anchor its working low later on any new
+        # COMPLETE4H low above strict origin. This is how the parquet workflow handled
+        # BCH/GRAM/USOIL and is why accepting above W3-(1) must not delete the structure.
+        structure_locked = False
+        if previous.wave_type == "W2" and previous.impulse_high is not None:
+            lock_from_raw = previous.working_low_ts or previous.impulse_high_ts
+            if lock_from_raw:
+                lock_from = pd.Timestamp(lock_from_raw)
+                if lock_from.tzinfo is None:
+                    lock_from = lock_from.tz_localize("UTC")
+                else:
+                    lock_from = lock_from.tz_convert("UTC")
+                structure_locked = bool(
+                    not h4[(h4["timestamp"] > lock_from) & (h4["close"] > float(previous.impulse_high))].empty
+                )
 
         reanchored = False
-        if not structure_consumed and not new_h4.empty and previous.working_low is not None:
+        if not structure_locked and not new_h4.empty and previous.working_low is not None:
             idx = new_h4["low"].idxmin()
             candidate_low = float(h4.at[idx, "low"])
             if strict < candidate_low < previous.working_low:
@@ -802,8 +901,8 @@ class SeniorWaveDetector:
         previous.status = _status_from_state(previous.growth_from_low_pct, previous.fib_status)  # type: ignore[assignment]
         if reanchored:
             previous.last_event = "RE-ANCHOR COMPLETE4H"
-        elif structure_consumed:
-            previous.last_event = f"{previous.wave_type} LOCKED — IMPULSE HIGH ALREADY ACCEPTED"
+        elif structure_locked:
+            previous.last_event = "W2 LOCKED — W1 HIGH ALREADY ACCEPTED"
         else:
             previous.last_event = "UPDATED"
         previous.updated_at = now

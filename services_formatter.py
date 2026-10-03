@@ -112,7 +112,7 @@ def _confirmed_recovery_ratio(fib_status: str) -> float | None:
 def _row_values_flags(state: WaveState, rank: int | None) -> tuple[list[str], list[bool]]:
     """One source of truth for text and PNG rows.
 
-    v0014 deliberately uses sparse emphasis: bold/green means a genuinely favorable
+    v0015 deliberately uses sparse emphasis: bold/green means a genuinely favorable
     property, not merely a valid field. This keeps the image readable at a glance.
     """
     invalid = state.status in {"INVALID", "RECOUNT", "NO_SETUP", "DATA_INCOMPLETE"}

@@ -47,7 +47,7 @@ class BotController:
         self.router = Router()
         self.started = time.monotonic()
         self.cooldowns: dict[int, float] = {}
-        # No Telegram account whitelist in v0014. Any chat that talks to the bot can use it
+        # No Telegram account whitelist in v0015. Any chat that talks to the bot can use it
         # and becomes a persisted destination for periodic reports.
         self.report_chats: set[int] = set()
         self.scheduler: DynamicScheduler | None = None
