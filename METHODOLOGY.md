@@ -1,4 +1,4 @@
-# Senior-wave methodology used by v0017
+# Senior-wave methodology used by v0018
 
 Цель детектора — только **global/senior W2 и W3-(2)**. Микроволны и обычные локальные откаты не должны получать senior label.
 
@@ -21,26 +21,26 @@
 
 Для каждого валидного parent W2:
 
-1. W3-(1) должна быть meaningful senior leg: абсолютный рост от parent W2 не меньше `10%`, плюс мягкая проверка degree относительно parent W1.
-2. Кандидат W3-(1) должен быть **record high с момента parent W2**. Lower-high bounce внутри коррекции не является новой W3-(1).
-3. После high требуется как минимум две COMPLETE4H свечи и pullback выше parent W2.
-4. W3-(2) retrace допускается `0.20 .. 0.97`. Неглубокие ~20–38.2% коррекции валидны, если сам impulse senior.
-5. Если **после candidate high уже был COMPLETE4H close выше этого high**, данный pair считается завершённым для свежего поиска. Это не означает «стереть историю» — просто текущая W3-(2) уже сыграна.
-6. Детектор продолжает вперёд по тому же parent count и может найти следующий senior record-high leg + текущий pullback. Это не разрешает lower-high микроволны: новый high обязан быть record high и пройти degree-фильтр.
-7. Среди ещё активных вариантов берётся наиболее поздняя senior структура.
+1. W3-(1) должна быть meaningful senior leg: достаточная амплитуда, degree и минимум несколько COMPLETE4H баров развития.
+2. Lower-high bounce внутри коррекции не является W3-(1).
+3. Один isolated MEXC upper-wick без подтверждения телом/соседними COMPLETE4H не может стать projection high.
+4. W3-(2) retrace допускается `0.20 .. 0.97`.
+5. **Ключевое правило v0018:** как только первый senior structural W3-(1) сформировал валидную W3-(2), его high замораживается для этой структуры. Последующие higher highs относятся к продолжению W3 и не пересчитывают старую W3-(1).
+6. Working low W3-(2) берётся только из её correction window; после подтверждения continuation старые targets не re-anchor к следующему high.
+7. Новый самостоятельный W3-(2) требует нового senior parent count, а не просто очередного higher high внутри уже идущей W3.
 
-Такой lifecycle нужен, чтобы не застревать навсегда на старом раннем subwave (ошибка BCH в v0015), но и не объявлять каждый lower-high pullback новой senior W3-(2).
+Это правило устраняет live-ошибку v0017, когда правильный BCH/USOIL working low оставался на месте, но более поздний high раздувал длину projection impulse и цели.
 
 ## Global-lineage fallback
 
-Иногда nested W3-(1) геометрически выглядит как отдельная daily W1/W2. Тогда detector проверяет lineage:
+Иногда реальный W3-(1)→W3-(2) геометрически выглядит как отдельная daily W1/W2. Тогда detector проверяет lineage:
 
-- child origin должен совпадать с parent W2 в разумном допуске;
-- child high должен быть senior record high от parent W2;
-- после high не должно быть COMPLETE4H acceptance выше него;
-- current correction low должен оставаться выше parent W2 и удовлетворять nested retrace.
+- если child origin совпадает с известным parent W2, child автоматически наследует nested degree;
+- если daily parent enumeration старую ветку не сохранил, COMPLETE4H history может доказать, что child origin сам является предыдущей senior W2;
+- child high должен быть structural, а не isolated wick;
+- child correction low должен оставаться выше child origin и удовлетворять nested retrace.
 
-Если это выполняется, hierarchy трактуется как **W3-(1) -> W3-(2)**, а не как новая глобальная W2. Это важный GRAM-like случай.
+После такого доказательства используются **child origin/high/low**, а не более старые global anchors. Это generic GRAM-like repair без symbol-specific `if GRAM`.
 
 ## Strict invalidation
 
@@ -61,7 +61,7 @@ Recovery статус оценивается только по COMPLETE4H close 
 
 ## Targets
 
-v0017 считает цели отдельным projection engine. Generic wave geometry не имеет права подменять projection anchors.
+v0018 считает цели отдельным projection engine. Generic wave geometry не имеет права подменять projection anchors.
 
 Для `W2`:
 
@@ -93,7 +93,7 @@ Golden references:
 
 ## Execution zones
 
-Zones являются execution context и строятся около текущего working low. Они не имеют права тянуть fresh entry обратно к старому global origin. v0017 не вводит symbol-specific zone hacks: сначала исправляется hierarchy/anchor selection.
+Zones являются execution context и строятся около текущего working low. Они не имеют права тянуть fresh entry обратно к старому global origin. v0018 не вводит symbol-specific zone hacks: сначала исправляется hierarchy/anchor selection.
 
 ## Rating
 
@@ -119,4 +119,4 @@ Rating — **opportunity score**, а не «качество монеты». О�
 
 `/walk` — отдельная диагностика fixed 10 majors. Он не меняет Search/Track state.
 
-Для W3-(2) diagnostic identity включает parent W2 и active W3-(1), чтобы новый действительно senior record-high leg был виден отдельно, а обычные re-observations одной коррекции подавлялись как duplicates.
+Для W3-(2) diagnostic identity привязан к senior parent W2. Повторные наблюдения, уточнение working low и последующие higher highs внутри той же W3 считаются одной живущей структурой, а не новыми fresh-сигналами.

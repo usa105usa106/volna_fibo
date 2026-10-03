@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-LABEL org.opencontainers.image.version="0017"
+LABEL org.opencontainers.image.version="0018"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
@@ -15,7 +15,7 @@ COPY requirements.txt requirements.lock.txt ./
 RUN pip install --no-cache-dir -r requirements.lock.txt
 
 COPY *.py ./
-COPY METHODOLOGY.md README.md CHANGELOG_v0017.md AUDIT_v0017.md ./
+COPY METHODOLOGY.md README.md CHANGELOG_v0018.md AUDIT_v0018.md ./
 
 RUN mkdir -p /data
 

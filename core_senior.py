@@ -32,6 +32,16 @@ class DetectorConfig:
     min_nested_parent_impulse_ratio: float = 0.15
     min_nested_retrace: float = 0.20
     max_nested_retrace: float = 0.97
+    # A senior W3-(1) may be volatile, but an isolated MEXC wick must not become
+    # the projection anchor.  Manual parquet reviews use the structural swing,
+    # not a single unconfirmed futures spike.
+    max_isolated_upper_wick_pct: float = 0.055
+    structural_high_peer_tolerance: float = 0.025
+    structural_high_neighbor_bars: int = 2
+    # Two adjacent 4H bars are still micro noise for our senior map.  Requiring
+    # several COMPLETE4H bars before the high avoids the old BCH 266 -> 243
+    # internal subwave stealing the W3-(1) label.
+    min_nested_impulse_bars: int = 4
     max_w1_age_days: int = 180
 
 
@@ -466,11 +476,45 @@ class SeniorWaveDetector:
         return result
 
     @staticmethod
-    def _same_level(a: float | None, b: float | None, *, rel: float = 0.015) -> bool:
+    def _same_level(a: float | None, b: float | None, *, rel: float = 0.03) -> bool:
         if a is None or b is None:
             return False
         scale = max(abs(float(a)), abs(float(b)), 1e-12)
         return abs(float(a) - float(b)) / scale <= rel
+
+    def _structural_high_ok(self, h4: pd.DataFrame, idx: int) -> bool:
+        """Return True when a pivot high is a structural swing, not one isolated wick.
+
+        The v0017 target math itself was correct, but MEXC raw highs could replace
+        the manually validated W3-(1) anchor with a later isolated futures spike.
+        That inflated BCH/USOIL projection length even though the displayed wave
+        label and working low looked plausible.
+
+        A high is accepted when its upper wick is modest OR another nearby COMPLETE4H
+        candle trades close to the same level.  This keeps real blow-off clusters but
+        rejects one-candle anomalies.
+        """
+        try:
+            pos = h4.index.get_loc(idx)
+        except KeyError:
+            return False
+        row = h4.loc[idx]
+        high = float(row["high"])
+        body_top = max(float(row["open"]), float(row["close"]))
+        if not math.isfinite(high) or high <= 0 or body_top <= 0:
+            return False
+        wick_pct = max(0.0, high / body_top - 1.0)
+        if wick_pct <= self.cfg.max_isolated_upper_wick_pct:
+            return True
+
+        n = self.cfg.structural_high_neighbor_bars
+        lo = max(0, pos - n)
+        hi = min(len(h4), pos + n + 1)
+        peers = h4.iloc[lo:hi].drop(index=idx, errors="ignore")
+        if peers.empty:
+            return False
+        peer_high = float(peers["high"].max())
+        return peer_high >= high * (1.0 - self.cfg.structural_high_peer_tolerance)
 
     def _nested_impulse_is_senior(self, high: float, g: dict) -> bool:
         """Reject micro 4H W3-(1) candidates inside an otherwise senior parent.
@@ -494,13 +538,15 @@ class SeniorWaveDetector:
         return nested_len >= self.cfg.min_nested_parent_impulse_ratio * parent_len
 
     def _lineage_nested(self, h4: pd.DataFrame, parent: dict, globals_: list[dict]) -> dict | None:
-        """Recover W3-(2) lineage when a nested W3-(1) also looks like a new global W1.
+        """Promote a daily child W1/W2 geometry to senior W3-(1)/W3-(2).
 
-        The important v0017 rule is *active structure*, not "first structure ever".
-        A child high whose correction has already been followed by COMPLETE4H
-        acceptance back above that high is historical/internal and must not own the
-        current W3-(2) label.  Among still-active children we prefer the latest
-        record high.
+        A child that already passed the full global-candidate filters is senior by
+        construction, so v0018 no longer re-rejects it with the coarse nested
+        amplitude ratio.  This is the GRAM failure from v0015-v0017.
+
+        Crucially, the child's *own* origin/high/W2 low are preserved as projection
+        anchors.  We do not rescan the whole future tail and accidentally replace
+        them with an older parent or later MEXC wick.
         """
         parent_low = float(parent["w2_low"])
         parent_ts = pd.Timestamp(parent["w2_ts"])
@@ -515,6 +561,7 @@ class SeniorWaveDetector:
                 continue
             if not self._same_level(child.get("origin"), parent_low):
                 continue
+
             high_ts = pd.Timestamp(child["high_ts"])
             low_ts = pd.Timestamp(child["w2_ts"])
             if high_ts.tzinfo is None:
@@ -527,47 +574,100 @@ class SeniorWaveDetector:
                 low_ts = low_ts.tz_convert("UTC")
             if high_ts <= parent_ts or low_ts <= high_ts:
                 continue
+
+            origin = float(child["origin"])
             high = float(child["high"])
-            if high <= parent_low:
-                continue
-            if not self._nested_impulse_is_senior(high, parent):
-                continue
-
-            # The W3-(1) must be a record high of the move from parent W2.  A lower
-            # bounce inside an already-active correction is not a new senior W3-(1).
-            history_to_high = h4[(h4["timestamp"] > parent_ts) & (h4["timestamp"] <= high_ts)]
-            if history_to_high.empty or high + 1e-12 < float(history_to_high["high"].max()):
+            low = float(child["w2_low"])
+            if high <= origin or low <= origin or low >= high:
                 continue
 
-            tail = h4[h4["timestamp"] > high_ts]
-            if len(tail) < 2:
-                continue
-            # Once the high is accepted above, that correction has completed.  It
-            # cannot remain the current senior W3-(2) anchor (the v0015 BCH bug).
-            if not tail[tail["close"] > high].empty:
-                continue
-            if float(tail["low"].min()) <= parent_low:
-                continue
-            low_idx = tail["low"].idxmin()
-            low = float(h4.at[low_idx, "low"] )
-            low_ts_active = h4.at[low_idx, "timestamp"]
-            retrace = (high - low) / (high - parent_low)
+            # Full daily child geometry has already passed global amplitude/ATR
+            # filters.  It is therefore a stronger degree proof than the old coarse
+            # nested-parent ratio that rejected GRAM.
+            retrace = (high - low) / (high - origin)
             if not (self.cfg.min_nested_retrace <= retrace <= self.cfg.max_nested_retrace):
                 continue
+
+            # Reject a child whose high is just one isolated MEXC wick.  Map the
+            # timestamp back to COMPLETE4H when it is available.
+            matches = h4.index[h4["timestamp"].eq(high_ts)].tolist()
+            if matches and not self._structural_high_ok(h4, matches[0]):
+                continue
+
             eligible.append({
-                "origin": parent_low,
+                "origin": origin,
                 "high": high,
                 "high_ts": high_ts,
                 "low": low,
-                "low_ts": low_ts_active,
+                "low_ts": low_ts,
                 "retrace": retrace,
                 "source": "GLOBAL_LINEAGE_ACTIVE",
             })
 
         if not eligible:
             return None
+        # Prefer the latest completed child geometry; its own anchors stay frozen.
         eligible.sort(key=lambda c: pd.Timestamp(c["high_ts"]), reverse=True)
         return eligible[0]
+
+    def _origin_is_prior_w2_h4(self, h4: pd.DataFrame, child: dict) -> bool:
+        """Prove that a global-looking child origin is itself an older senior W2.
+
+        This is intentionally an ancestry check, not a second full detector.  It is
+        used only to decide whether a current daily W1/W2 geometry should be read as
+        W3-(1)/W3-(2), which is the GRAM-like failure from v0015-v0017.
+        """
+        origin = float(child.get("origin", 0.0))
+        raw_ts = child.get("origin_ts")
+        if raw_ts is None or not math.isfinite(origin) or origin <= 0:
+            return False
+        origin_ts = pd.Timestamp(raw_ts)
+        if origin_ts.tzinfo is None:
+            origin_ts = origin_ts.tz_localize("UTC")
+        else:
+            origin_ts = origin_ts.tz_convert("UTC")
+
+        pre = h4[(h4["timestamp"] < origin_ts) & (h4["timestamp"] >= origin_ts - pd.Timedelta(days=120))].copy()
+        if len(pre) < 8:
+            return False
+
+        # Prefer real pivot highs but always include the dominant pre-origin high as
+        # a fallback; sparse/monotonic senior legs do not always create a centered
+        # pivot in synthetic or newly listed data.
+        high_mask = _pivot_mask(pre["high"], self.cfg.fourh_pivot_window, "high")
+        highs = list(pre.index[high_mask.fillna(False)])
+        dominant = pre["high"].idxmax()
+        if dominant not in highs:
+            highs.append(dominant)
+
+        for hi in sorted(highs, reverse=True):
+            high = float(h4.at[hi, "high"])
+            high_ts = pd.Timestamp(h4.at[hi, "timestamp"])
+            if high <= origin or (origin_ts - high_ts).days > 60:
+                continue
+
+            post = h4[(h4["timestamp"] > high_ts) & (h4["timestamp"] <= origin_ts)]
+            if post.empty:
+                continue
+            post_low = float(post["low"].min())
+            # The child origin must actually be the correction low, not merely some
+            # later arbitrary daily low in the same broad range.
+            if abs(post_low - origin) / max(origin, 1e-12) > 0.03:
+                continue
+
+            before = h4[(h4["timestamp"] < high_ts) & (h4["timestamp"] >= high_ts - pd.Timedelta(days=120))]
+            if before.empty:
+                continue
+            prior_low = float(before["low"].min())
+            if prior_low <= 0 or prior_low >= origin or high <= prior_low:
+                continue
+            impulse = high - prior_low
+            if high / prior_low - 1.0 < self.cfg.min_global_impulse_pct:
+                continue
+            retrace = (high - origin) / impulse
+            if self.cfg.min_w2_retrace <= retrace <= self.cfg.max_w2_retrace:
+                return True
+        return False
 
     def detect(self, snapshot: MarketSnapshot, liquidity_rank: int | None, top_n: int) -> WaveState | None:
         daily = snapshot.daily_closed.copy()
@@ -594,6 +694,26 @@ class SeniorWaveDetector:
             nested = self._detect_nested(h4, g)
             if nested is None:
                 nested = self._lineage_nested(h4, g, global_candidates)
+
+            # A current global-looking W1/W2 can itself be the nested W3-(1)/W3-(2)
+            # when its origin is proven to be an older senior W2.  This is the live
+            # GRAM case that v0015-v0017 kept mislabelling as plain W2.
+            if nested is None and not g.get("w2_locked", False) and self._origin_is_prior_w2_h4(h4, g):
+                high_matches = h4.index[h4["timestamp"].eq(pd.Timestamp(g["high_ts"]))].tolist()
+                if not high_matches or self._structural_high_ok(h4, high_matches[0]):
+                    child_len = float(g["high"]) - float(g["origin"])
+                    if child_len > 0:
+                        child_retrace = (float(g["high"]) - float(g["w2_low"])) / child_len
+                        if self.cfg.min_nested_retrace <= child_retrace <= self.cfg.max_nested_retrace:
+                            nested = {
+                                "origin": float(g["origin"]),
+                                "high": float(g["high"]),
+                                "high_ts": g["high_ts"],
+                                "low": float(g["w2_low"]),
+                                "low_ts": g["w2_ts"],
+                                "retrace": child_retrace,
+                                "source": "H4_INFERRED_PARENT_W2",
+                            }
             if nested is not None:
                 state = self._build_state(
                     snapshot=snapshot,
@@ -658,23 +778,16 @@ class SeniorWaveDetector:
         return ranked_states[0][1]
 
     def _detect_nested(self, h4: pd.DataFrame, g: dict) -> dict | None:
-        """Return the *current active* senior W3-(1) -> W3-(2) pair.
+        """Return the senior W3-(1) -> W3-(2) map with frozen impulse anchors.
 
-        v0015 froze the first qualifying post-W2 pivot forever.  That made an old
-        BCH micro leg (~212.9 -> ~266 -> ~243) survive even after price had long
-        accepted above ~266, while the actually active senior leg
-        212.9 -> 317.7 -> 296.1 was ignored.
+        The decisive v0018 change is lifecycle ordering.  W3-(1) is the *first
+        senior structural impulse* after parent W2 that produces a qualifying
+        W3-(2) correction.  Once that correction exists, later W3 continuation
+        highs must NOT rewrite W3-(1) and inflate T1/T2/T3/T4.
 
-        v0017 uses four invariants:
-        1) W3-(1) high must be a running/record high since parent W2;
-        2) it must be senior enough in absolute and parent-degree terms;
-        3) its pullback low must remain above parent W2 and satisfy nested retrace;
-        4) there must be NO later COMPLETE4H close above that high.  Acceptance
-           above means that candidate correction is complete/stale, so we continue
-           looking for the next (later) record-high correction.
-
-        Scanning newest -> oldest gives the same "current senior pullback" behavior
-        used in the parquet reviews without letting lower-high bounces create labels.
+        This is exactly what v0017 still got wrong on live MEXC: BCH/USOIL kept the
+        right working-low area but a later high replaced the projection high.
+        Isolated futures wicks are filtered as an additional guard.
         """
         parent_low = float(g["w2_low"])
         parent_ts = pd.Timestamp(g["w2_ts"])
@@ -684,15 +797,13 @@ class SeniorWaveDetector:
             parent_ts = parent_ts.tz_convert("UTC")
 
         after_w2 = h4[h4["timestamp"] > parent_ts].copy()
-        if len(after_w2) < 8:
+        if len(after_w2) < max(8, self.cfg.min_nested_impulse_bars + 2):
             return None
 
         high_mask = _pivot_mask(after_w2["high"], self.cfg.fourh_pivot_window, "high")
         pivots = list(after_w2.index[high_mask.fillna(False)])
 
-        # A very recent active high can lack enough right-hand bars for the centered
-        # pivot mask.  Admit the latest running maximum when at least two COMPLETE4H
-        # candles already exist after it; the retrace test below still has to pass.
+        # A recent high may not yet have enough right-hand bars for centered pivot.
         running_max_idx = after_w2["high"].idxmax()
         if running_max_idx not in pivots:
             loc = after_w2.index.get_loc(running_max_idx)
@@ -701,23 +812,33 @@ class SeniorWaveDetector:
 
         candidates: list[dict] = []
         running_high = -math.inf
+        first_idx = after_w2.index[0]
+        first_pos = h4.index.get_loc(first_idx)
         for idx in after_w2.index:
             high = float(h4.at[idx, "high"])
             if high > running_high:
                 running_high = high
             if idx not in pivots:
                 continue
-            # Lower highs inside a correction are not a new senior W3-(1).
+            # A lower high inside an existing correction cannot start senior W3-(1).
             if high + max(1e-12, abs(running_high) * 1e-9) < running_high:
                 continue
+            bars_from_parent = h4.index.get_loc(idx) - first_pos + 1
+            if bars_from_parent < self.cfg.min_nested_impulse_bars:
+                continue
             if not self._nested_impulse_is_senior(high, g):
+                continue
+            if not self._structural_high_ok(h4, idx):
                 continue
             candidates.append({"idx": idx, "high": high, "high_ts": h4.at[idx, "timestamp"]})
 
         if not candidates:
             return None
 
-        for candidate in reversed(candidates):
+        # IMPORTANT: chronological order.  The first senior impulse that actually
+        # produces a valid correction owns the W3-(1) anchor.  Later highs belong to
+        # the continuation and cannot retarget the already established W3-(2).
+        for candidate in candidates:
             high = float(candidate["high"])
             high_ts = pd.Timestamp(candidate["high_ts"])
             if high_ts.tzinfo is None:
@@ -728,14 +849,14 @@ class SeniorWaveDetector:
             if len(tail) < 2:
                 continue
 
-            # If COMPLETE4H has already accepted above this W3-(1) high, its W3-(2)
-            # is no longer the current correction.  Skip stale early subwaves.
-            if not tail[tail["close"] > high].empty:
+            accepted = tail[tail["close"] > high]
+            correction = tail if accepted.empty else tail[tail["timestamp"] < accepted["timestamp"].iloc[0]]
+            if len(correction) < 2:
                 continue
-            if float(tail["low"].min()) <= parent_low:
+            if float(correction["low"].min()) <= parent_low:
                 continue
 
-            low_idx = tail["low"].idxmin()
+            low_idx = correction["low"].idxmin()
             working_low = float(h4.at[low_idx, "low"])
             working_low_ts = h4.at[low_idx, "timestamp"]
             length = high - parent_low
@@ -744,6 +865,7 @@ class SeniorWaveDetector:
             retrace = (high - working_low) / length
             if not (self.cfg.min_nested_retrace <= retrace <= self.cfg.max_nested_retrace):
                 continue
+
             return {
                 "origin": parent_low,
                 "high": high,
@@ -751,7 +873,7 @@ class SeniorWaveDetector:
                 "low": working_low,
                 "low_ts": working_low_ts,
                 "retrace": retrace,
-                "source": "H4_ACTIVE_RECORD_HIGH",
+                "source": "H4_FROZEN_FIRST_SENIOR_W3_1",
             }
         return None
 
