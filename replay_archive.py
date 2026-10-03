@@ -86,16 +86,16 @@ def main():
             states.append(data_incomplete_state(asset, "mexc_futures" if asset in {"XAU", "USOIL"} else "binance_spot", None, is_control=asset in {"XAU", "USOIL"}, event=str(exc)))
     args.output.mkdir(parents=True, exist_ok=True)
     provenance = {
-        "version": "0019", "snapshot": str(reader.asof),
+        "version": "0020", "snapshot": str(reader.asof),
         "sources": {"crypto": "Binance Spot", "XAU/USOIL": "MEXC Futures"},
         "limitations": ["No incomplete live-candle wick is stored in this archive", "Historical replay uses snapshot liquidity ranks; it is not an out-of-sample profitability test"],
         "file_sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in args.archive.glob("*.parquet")},
     }
     (args.output / "states.json").write_text(json.dumps({"provenance": provenance, "states": [s.to_dict() for s in states], "errors": errors}, ensure_ascii=False, indent=2))
-    heading = ["SENIOR WAVE BOT v0019 — OFFLINE REPLAY", f"Snapshot: {reader.asof}", "Crypto: Binance Spot; controls: MEXC Futures. Exchange sources are separate."]
+    heading = ["SENIOR WAVE BOT v0020 — OFFLINE REPLAY", f"Snapshot: {reader.asof}", "Crypto: Binance Spot; controls: MEXC Futures. Exchange sources are separate."]
     (args.output / "audit.txt").write_text(technical_report_text(states, heading=heading, errors=errors), encoding="utf-8")
     display = states if args.symbols else select_top_crypto([s for s in states if (s.rating or 0) >= 7.5]) + [s for s in states if s.is_control]
-    (args.output / "table.png").write_bytes(render_table_png(display, title="OFFLINE REPLAY · 0019", subtitle="Binance Spot crypto / MEXC controls · 03.10.2026 09:25 MSK", crypto_label="SENIOR CRYPTO", version="0019"))
+    (args.output / "table.png").write_bytes(render_table_png(display, title="OFFLINE REPLAY · 0020", subtitle="Binance Spot crypto / MEXC controls · 03.10.2026 09:25 MSK", crypto_label="SENIOR CRYPTO", version="0020"))
     print(json.dumps({"assets": len(states), "setups": sum(s.wave_type in {"W2", "W3-(2)"} for s in states), "data_errors": len(errors)}, ensure_ascii=False))
 
 

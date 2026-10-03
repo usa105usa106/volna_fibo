@@ -139,6 +139,8 @@ def _row_values_flags(state: WaveState, rank: int | None) -> tuple[list[str], li
     growth = "—" if state.growth_from_low_pct is None else f"{state.growth_from_low_pct:+.1f}%"
     rating = "—" if state.rating is None else f"{state.rating:.1f}"
     wave = state.wave_type if not invalid else f"{state.status} / {state.wave_type}"
+    if not invalid and state.structure_evidence.get("projection_accepted_at"):
+        wave = f"после {state.wave_type}"
     if not invalid and state.targets_hit:
         wave += " · late"
     values = [

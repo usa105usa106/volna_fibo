@@ -48,7 +48,7 @@ class WaveState:
     target_impulse_length: float | None = None
     target_source: str | None = None
     targets_hit: list[int] = field(default_factory=list)
-    detector_version: str = "0019"
+    detector_version: str = "0020"
     structure_evidence: dict[str, Any] = field(default_factory=dict)
     base_zone: tuple[float, float] | None = None
     deep_zone: tuple[float, float] | None = None

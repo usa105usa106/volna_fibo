@@ -198,6 +198,14 @@ def _reached_targets(snapshot: MarketSnapshot, low_ts, targets: list[float]) -> 
     return [i for i, target in enumerate(targets, 1) if high >= target]
 
 
+def _projection_acceptance(h4: pd.DataFrame, high: float, low_ts) -> str | None:
+    """First closing acceptance: the low of that same candle precedes its close."""
+    if low_ts is None or h4.empty:
+        return None
+    accepted = h4[(h4["timestamp"] >= _utc(low_ts)) & (h4["close"] > high)]
+    return _iso(accepted["timestamp"].iloc[0]) if not accepted.empty else None
+
+
 def _target_projection_anchors(
     wave_type: str,
     *,
@@ -772,10 +780,10 @@ class SeniorWaveDetector:
         if not global_candidates:
             return None
 
-        # A valid nested W3-(2) has hierarchy priority over a newer local geometry
-        # that merely looks like another global W2. Within the same degree, prefer the
-        # most recent senior parent; parent amplitude is only a final tie-breaker.
-        ranked_states: list[tuple[tuple[float, float, float], WaveState]] = []
+        # Current corrections precede historical, already accepted corrections.
+        # Hierarchy priority applies WITHIN the same lifecycle, so an old nested
+        # leg cannot hide a current global W2 merely by being named W3-(2).
+        ranked_states: list[tuple[tuple[bool, float, float, float], WaveState]] = []
         for g in global_candidates:
             # Direct COMPLETE4H hierarchy is authoritative.  Global-lineage is a
             # fallback for cases where the same nested leg also appears as a daily
@@ -826,17 +834,19 @@ class SeniorWaveDetector:
                     is_control=snapshot.symbol in {"XAU", "USOIL"},
                 )
                 if state is not None:
-                    state.structure_evidence = {
+                    state.structure_evidence.update({
                         "route": nested["source"],
                         "daily_origin": g["origin"], "daily_origin_ts": _iso(g["origin_ts"]),
                         "daily_high": g["high"], "daily_high_ts": _iso(g["high_ts"]),
                         "daily_high_context_only": g.get("high_context_only", False),
                         "parent_low": g["w2_low"], "parent_low_ts": _iso(g["w2_ts"]),
-                    }
+                    })
                     ranked_states.append(
-                        ((3.0, pd.Timestamp(g["w2_ts"]).timestamp(), float(g.get("impulse_pct", 0.0))), state)
+                        ((not state.structure_evidence.get("projection_accepted_at"), 3.0,
+                          pd.Timestamp(g["w2_ts"]).timestamp(), float(g.get("impulse_pct", 0.0))), state)
                     )
-                continue
+                # Also evaluate this parent's current W2. The nested candidate
+                # can be a historical child of an earlier, already completed leg.
 
             # Once W1 high has accepted above, the old global W2 is no longer the
             # developing wave. Keep it out of fresh Search unless a nested W3-(2) can
@@ -870,9 +880,10 @@ class SeniorWaveDetector:
                 is_control=snapshot.symbol in {"XAU", "USOIL"},
             )
             if state is not None:
-                state.structure_evidence = {"route": "DAILY_W1_COMPLETE4H_W2", "daily_high_context_only": False}
+                state.structure_evidence.update({"route": "DAILY_W1_COMPLETE4H_W2", "daily_high_context_only": False})
                 ranked_states.append(
-                    ((2.0, pd.Timestamp(g["w2_ts"]).timestamp(), float(g.get("impulse_pct", 0.0))), state)
+                    ((not state.structure_evidence.get("projection_accepted_at"), 2.0,
+                      pd.Timestamp(g["w2_ts"]).timestamp(), float(g.get("impulse_pct", 0.0))), state)
                 )
 
         if not ranked_states:
@@ -1053,7 +1064,8 @@ class SeniorWaveDetector:
                 and self._same_level(impulse_high, target_high)):
             return None
         targets_hit = _reached_targets(snapshot, working_low_ts, targets)
-        t1_upside = ((targets[0] / live) - 1) * 100 if targets and live > 0 else None
+        accepted_at = _projection_acceptance(h4, impulse_high, working_low_ts)
+        t1_upside = 0.0 if 1 in targets_hit else (((targets[0] / live) - 1) * 100 if targets and live > 0 else None)
         rating = _rating(
             retrace, growth, strict_distance, status, liquidity_rank, top_n, wave_type, t1_upside
         )
@@ -1063,7 +1075,7 @@ class SeniorWaveDetector:
             symbol=snapshot.symbol,
             exchange=snapshot.exchange,
             wave_type=wave_type,  # type: ignore[arg-type]
-            status="EXTENDED" if targets_hit else _status_from_state(growth, status),  # type: ignore[arg-type]
+            status="EXTENDED" if targets_hit or accepted_at else _status_from_state(growth, status),  # type: ignore[arg-type]
             origin=origin,
             impulse_high=impulse_high,
             working_low=working_low,
@@ -1084,6 +1096,7 @@ class SeniorWaveDetector:
             target_impulse_length=target_length,
             target_source=target_source,
             targets_hit=targets_hit,
+            structure_evidence={"projection_accepted_at": accepted_at},
             base_zone=base,
             deep_zone=deep,
             current_price=live,
@@ -1194,16 +1207,16 @@ class SeniorWaveDetector:
             if h4["timestamp"].iloc[-1] < last_seen:
                 raise DataIntegrityError("tracking COMPLETE4H checkpoint moved backwards")
 
-        if previous.detector_version != "0019":
+        if previous.detector_version != "0020":
             rebuilt = self.detect(snapshot, previous.liquidity_rank, top_n)
             if rebuilt is not None:
                 rebuilt.is_control = previous.is_control
                 rebuilt.created_at = previous.created_at or rebuilt.created_at
-                rebuilt.last_event = "V0019 SAME-SYMBOL RECOUNT — LEGACY ANCHORS REPLACED"
+                rebuilt.last_event = "V0020 SAME-SYMBOL RECOUNT — LEGACY ANCHORS REPLACED"
                 return rebuilt
             previous.status = "RECOUNT"
-            self._clear_derived(previous, fib_status="V0019 RECOUNT REQUIRED")
-            previous.last_event = "V0019 — LEGACY ANCHORS NOT CONFIRMED"
+            self._clear_derived(previous, fib_status="V0020 RECOUNT REQUIRED")
+            previous.last_event = "V0020 — LEGACY ANCHORS NOT CONFIRMED"
             previous.updated_at = now
             return previous
         new_h4 = h4 if last_seen is None else h4[h4["timestamp"] > last_seen]
@@ -1223,15 +1236,14 @@ class SeniorWaveDetector:
         if previous.impulse_high is not None and previous.wave_type in {"W2", "W3-(2)"}:
             lock_from_raw = previous.working_low_ts or previous.impulse_high_ts
             if lock_from_raw:
-                lock_from = pd.Timestamp(lock_from_raw)
-                if lock_from.tzinfo is None:
-                    lock_from = lock_from.tz_localize("UTC")
-                else:
-                    lock_from = lock_from.tz_convert("UTC")
-                accepted = h4[(h4["timestamp"] > lock_from) & (h4["close"] > float(previous.impulse_high))]
-                if not accepted.empty:
+                accepted_at = previous.structure_evidence.get("projection_accepted_at")
+                observed_at = _projection_acceptance(h4, float(previous.impulse_high), lock_from_raw)
+                if observed_at and (not accepted_at or _utc(observed_at) < _utc(accepted_at)):
+                    accepted_at = observed_at
+                if accepted_at:
                     structure_locked = True
-                    eligible_h4 = new_h4[new_h4["timestamp"] <= accepted["timestamp"].iloc[0]]
+                    previous.structure_evidence["projection_accepted_at"] = accepted_at
+                    eligible_h4 = new_h4[new_h4["timestamp"] <= _utc(accepted_at)]
 
         reanchored = False
         if not eligible_h4.empty and previous.working_low is not None:
@@ -1305,7 +1317,7 @@ class SeniorWaveDetector:
         hits = _reached_targets(snapshot, previous.working_low_ts, previous.targets)
         previous.targets_hit = sorted(set(hits) | (set() if reanchored else set(previous.targets_hit)))
         previous.base_zone, previous.deep_zone = _zones(previous.working_low, high, strict)
-        t1_upside = (
+        t1_upside = 0.0 if 1 in previous.targets_hit else (
             (previous.targets[0] / previous.current_price - 1) * 100
             if previous.targets and previous.current_price and previous.current_price > 0
             else None
@@ -1320,7 +1332,7 @@ class SeniorWaveDetector:
             previous.wave_type,
             t1_upside,
         )
-        previous.status = "EXTENDED" if previous.targets_hit else _status_from_state(previous.growth_from_low_pct, previous.fib_status)  # type: ignore[assignment]
+        previous.status = "EXTENDED" if previous.targets_hit or structure_locked else _status_from_state(previous.growth_from_low_pct, previous.fib_status)  # type: ignore[assignment]
         if reanchored:
             previous.last_event = "RE-ANCHOR COMPLETE4H"
         elif structure_locked:
