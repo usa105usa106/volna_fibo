@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     bot_token: str = Field(alias="BOT_TOKEN")
     data_dir: Path = Field(default=Path("/data"), alias="DATA_DIR")
     bot_timezone: str = Field(default="Europe/Moscow", alias="BOT_TIMEZONE")
-    bot_version: str = Field(default="0015", alias="BOT_VERSION")
+    bot_version: str = Field(default="0017", alias="BOT_VERSION")
 
     default_top_n: int = Field(default=100, alias="DEFAULT_TOP_N")
     default_interval_minutes: int = Field(default=60, alias="DEFAULT_INTERVAL_MINUTES")

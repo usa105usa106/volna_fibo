@@ -47,7 +47,7 @@ class BotController:
         self.router = Router()
         self.started = time.monotonic()
         self.cooldowns: dict[int, float] = {}
-        # No Telegram account whitelist in v0015. Any chat that talks to the bot can use it
+        # No Telegram account whitelist in v0017. Any chat that talks to the bot can use it
         # and becomes a persisted destination for periodic reports.
         self.report_chats: set[int] = set()
         self.scheduler: DynamicScheduler | None = None
@@ -652,6 +652,13 @@ class BotController:
                     f"parent_w2_low={_fmt(sig.parent_w2_low)}; w3_1_high={_fmt(sig.w3_1_high)}",
                     f"    retrace={retrace}; growth_from_low={growth}; strict_distance={strict_dist}",
                     f"    fib_status={sig.fib_status}; fibs={fibs_text(sig.fibs)}",
+                    (
+                        "    target_projection="
+                        f"{sig.target_source or '—'}; "
+                        f"origin={_fmt(sig.target_origin)}; "
+                        f"high={_fmt(sig.target_impulse_high)}; "
+                        f"length={_fmt(sig.target_impulse_length)}"
+                    ),
                     f"    base={zone_text(sig.base_zone)}; deep/on-sweep={zone_text(sig.deep_zone)}",
                     f"    targets={targets_text(sig.targets)}; T1={_fmt(sig.t1)}",
                     f"    last_complete4h_bucket={sig.last_complete4h_bucket or '—'}",

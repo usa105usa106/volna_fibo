@@ -64,6 +64,10 @@ class WalkSignalRecord:
     fib_status: str
     fibs: dict[str, float]
     targets: list[float]
+    target_origin: float | None
+    target_impulse_high: float | None
+    target_impulse_length: float | None
+    target_source: str | None
     base_zone: tuple[float, float] | None
     deep_zone: tuple[float, float] | None
     t1: float
@@ -483,10 +487,14 @@ class ScannerService:
             def structure_key(state: WaveState) -> str:
                 """Stable senior identity; re-observing the same living wave is not a new signal."""
                 if state.wave_type == "W3-(2)":
-                    # One parent W2 can own only one senior W3-(2).  A later higher
-                    # W3 high must not create another "fresh" diagnostic signal.
+                    # v0017: identity is parent W2 + the active record-high W3-(1).
+                    # Re-observations/re-anchors of the same correction stay duplicates,
+                    # but a later genuinely new record-high correction is allowed to show
+                    # up as a separate walk signal.  This makes /walk expose over-counting
+                    # instead of hiding it behind a parent-only key.
                     left = state.parent_w2_ts or _price_key(state.parent_w2_low or state.strict_origin)
-                    return "|".join([state.wave_type, left, _price_key(state.strict_origin)])
+                    right = state.w3_1_high_ts or _price_key(state.w3_1_high or state.impulse_high)
+                    return "|".join([state.wave_type, left, right, _price_key(state.strict_origin)])
                 left = state.impulse_start_ts or _price_key(state.origin or state.strict_origin)
                 right = state.impulse_high_ts or _price_key(state.impulse_high)
                 return "|".join([state.wave_type, left, right, _price_key(state.strict_origin)])
@@ -687,6 +695,10 @@ class ScannerService:
                             fib_status=state.fib_status,
                             fibs=dict(state.fibs),
                             targets=list(state.targets),
+                            target_origin=state.target_origin,
+                            target_impulse_high=state.target_impulse_high,
+                            target_impulse_length=state.target_impulse_length,
+                            target_source=state.target_source,
                             base_zone=state.base_zone,
                             deep_zone=state.deep_zone,
                             t1=t1,

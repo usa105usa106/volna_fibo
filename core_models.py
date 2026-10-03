@@ -40,6 +40,13 @@ class WaveState:
     fibs: dict[str, float] = field(default_factory=dict)
     fib_status: str = "—"
     targets: list[float] = field(default_factory=list)
+    # Explicit projection anchors used to build T1..T4.  They are stored separately
+    # from the generic wave geometry so the target engine cannot silently fall back
+    # to a wrong parent impulse when a W3-(2) is being tracked/reloaded.
+    target_origin: float | None = None
+    target_impulse_high: float | None = None
+    target_impulse_length: float | None = None
+    target_source: str | None = None
     base_zone: tuple[float, float] | None = None
     deep_zone: tuple[float, float] | None = None
     current_price: float | None = None

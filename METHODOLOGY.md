@@ -1,83 +1,122 @@
-# Senior-wave methodology used by v0015
+# Senior-wave methodology used by v0017
 
-## Structural hierarchy
+Цель детектора — только **global/senior W2 и W3-(2)**. Микроволны и обычные локальные откаты не должны получать senior label.
 
-- 1D задаёт senior impulse/origin context.
-- COMPLETE4H строится только из четырёх полностью закрытых 1H свечей.
-- Новые senior anchors/re-anchors создаются только COMPLETE4H.
-- 1H intrabar может немедленно инвалидировать count при strict-origin wick break, но не создаёт новый Elliott label.
-- Бот ищет только **global W2** и **senior nested W3-(2)**. Микроволны не размечаются.
+## Таймфреймы
 
-## Global W2 lifecycle
+- 1D задаёт global W1 candidates и старший degree.
+- COMPLETE4H (строго четыре закрытые UTC 1H свечи) подтверждает W2/W3-(1)/W3-(2), recovery и re-anchor.
+- 1H используется для strict invalidation внутри незакрытой 4H, но не создаёт senior labels.
+- 15m не создаёт senior labels.
 
-1. На 1D/COMPLETE4H определяется senior W1 origin -> W1 high.
-2. W2 может углубляться/re-anchor, пока рынок не принял W1 high обратно.
-3. Первый устойчивый COMPLETE4H acceptance выше W1 high фиксирует parent W2 и запускает поиск nested W3-(1) / W3-(2).
-4. Более поздний pullback внутри уже идущей W3 не имеет права переписать старый global W2 low.
-5. Если strict origin пробит wick'ом — старый count INVALID немедленно.
+## Global W1 -> W2
 
-## Nested W3-(2) lifecycle
+1. Global W1 требует достаточную амплитуду относительно цены и ATR.
+2. W2 ищется после W1 high и должна оставаться выше W1 origin.
+3. W2 retrace: `0.50 .. 0.995`.
+4. Пока рынок не закрыл COMPLETE4H выше W1 high, W2 может уточнять working low.
+5. После COMPLETE4H acceptance выше W1 high эта W2 считается исторически завершённой как W2; поздний W3/W4 pullback нельзя переименовать в ту же старую W2.
 
-1. После parent W2 начинается senior W3-(1).
-2. Локальные 4H подволны не считаются W3-(1): nested impulse должен быть значим и сам по себе, и относительно parent W1 degree.
-3. Пока senior correction не сформирована, higher highs расширяют тот же W3-(1).
-4. Когда senior W3-(2) определена, её W3-(1) high **замораживается как projection anchor**.
-5. COMPLETE4H acceptance выше этого high НЕ удаляет W3-(2) и НЕ сдвигает W3-(1) high. Если позже появляется новый более низкий COMPLETE4H low выше strict origin, рабочий W3-(2) low re-anchor'ится, а цели пересчитываются от нового low по тому же frozen impulse.
-6. Если strict origin (parent W2) пробит — nested count INVALID и нужен senior recount.
+## Senior W3-(1) -> W3-(2)
 
-Такой lifecycle соответствует ручной parquet-разметке: BCH может сохранить W3-(1)=317.70, а W3-(2) re-anchor'ить к ~296 без переноса projection anchor на более поздние higher highs.
+Для каждого валидного parent W2:
 
-## Hierarchy / lineage
+1. W3-(1) должна быть meaningful senior leg: абсолютный рост от parent W2 не меньше `10%`, плюс мягкая проверка degree относительно parent W1.
+2. Кандидат W3-(1) должен быть **record high с момента parent W2**. Lower-high bounce внутри коррекции не является новой W3-(1).
+3. После high требуется как минимум две COMPLETE4H свечи и pullback выше parent W2.
+4. W3-(2) retrace допускается `0.20 .. 0.97`. Неглубокие ~20–38.2% коррекции валидны, если сам impulse senior.
+5. Если **после candidate high уже был COMPLETE4H close выше этого high**, данный pair считается завершённым для свежего поиска. Это не означает «стереть историю» — просто текущая W3-(2) уже сыграна.
+6. Детектор продолжает вперёд по тому же parent count и может найти следующий senior record-high leg + текущий pullback. Это не разрешает lower-high микроволны: новый high обязан быть record high и пройти degree-фильтр.
+7. Среди ещё активных вариантов берётся наиболее поздняя senior структура.
 
-Если новый геометрический «global W1» фактически начинается от уже известного senior W2, он не создаёт новый глобальный count. Это **W3-(1)** внутри старшего parent, а его последующая коррекция — **W3-(2)**.
+Такой lifecycle нужен, чтобы не застревать навсегда на старом раннем subwave (ошибка BCH в v0015), но и не объявлять каждый lower-high pullback новой senior W3-(2).
 
-Именно это правило не позволяет GRAM `1.286 -> 1.740 -> 1.460` ошибочно печатать как новый W2.
+## Global-lineage fallback
 
-## Active-state selection
+Иногда nested W3-(1) геометрически выглядит как отдельная daily W1/W2. Тогда detector проверяет lineage:
 
-Fresh Search пересчитывает всё с нуля и оценивает все валидные senior parents. Приоритет:
+- child origin должен совпадать с parent W2 в разумном допуске;
+- child high должен быть senior record high от parent W2;
+- после high не должно быть COMPLETE4H acceptance выше него;
+- current correction low должен оставаться выше parent W2 и удовлетворять nested retrace.
 
-1. валидная senior **W3-(2)**;
-2. валидная текущая **W2**;
-3. внутри одного класса — более свежий senior parent W2, затем размер старшего impulse.
+Если это выполняется, hierarchy трактуется как **W3-(1) -> W3-(2)**, а не как новая глобальная W2. Это важный GRAM-like случай.
 
-## Fib / recovery
+## Strict invalidation
 
-Recovery измеряется COMPLETE4H closes по `.236/.382/.500/.618/.705/.786/.886/.950`. Intrabar reclaim сам по себе структурным подтверждением не считается. `3/3 C4H` сильнее `2/3`, `2/3` сильнее одиночного reclaim.
+- Для W2 strict origin = W1 origin.
+- Для W3-(2) strict origin = parent W2.
+- Wick/low ниже strict origin на закрытой 1H или live low немедленно инвалидирует count.
+- INVALID/RECOUNT очищает Fib, zones, targets, growth, strict distance и rating; старые derived values не должны протекать в отчёт.
+
+## Fibonacci
+
+Fib retracement строится по **тому impulse, который соответствует wave type**:
+
+- W2: `global W1 origin -> global W1 high`.
+- W3-(2): `parent W2 -> active W3-(1) high`.
+
+Уровни: `.236, .382, .500, .618, .705, .786, .886, .950`.
+Recovery статус оценивается только по COMPLETE4H close и последним трём COMPLETE4H.
 
 ## Targets
 
-Targets только senior:
+v0017 считает цели отдельным projection engine. Generic wave geometry не имеет права подменять projection anchors.
 
-`Tn = working_low + multiplier × locked_impulse_length`
+Для `W2`:
 
-где multipliers: `1.0 / 1.618 / 2.618 / 4.236`.
+```text
+L = W1_high - W1_origin
+T1 = W2_low + 1.000L
+T2 = W2_low + 1.618L
+T3 = W2_low + 2.618L
+T4 = W2_low + 4.236L
+```
 
-Для W2 locked impulse = global W1. Для W3-(2) locked impulse = `parent W2 -> frozen W3-(1) high`. При re-anchor W3-(2) меняется только working low; impulse length не дрейфует вслед за последующими higher highs.
+Для `W3-(2)`:
 
-Reference regressions:
+```text
+L = W3-(1)_high - parent_W2_low
+T1 = W3-(2)_low + 1.000L
+T2 = W3-(2)_low + 1.618L
+T3 = W3-(2)_low + 2.618L
+T4 = W3-(2)_low + 4.236L
+```
 
-- BCH: `parent W2 212.90 -> W3-(1) 317.70 -> W3-(2) 296.10` -> `400.90 / 465.6664 / 570.4664 / 740.0328`.
-- GRAM: `1.286 -> 1.740 -> 1.460` -> `1.914 / 2.194572 / 2.648572 / 3.383144`.
+У `W3-(2)` отсутствие `parent_W2_low` или `W3-(1)_high` означает `RECOUNT`, а не fallback на global W1. В техническом `.txt` всегда выводятся `target_projection: source/origin/high/length`.
+
+Golden references:
+
+- BCH: `400.90 / 465.6664 / 570.4664 / 740.0328`;
+- GRAM: `1.914 / 2.194572 / 2.648572 / 3.383144`;
+- USOIL: `111.02 / 125.05478 / 147.76478 / 184.50956`.
+
+## Execution zones
+
+Zones являются execution context и строятся около текущего working low. Они не имеют права тянуть fresh entry обратно к старому global origin. v0017 не вводит symbol-specific zone hacks: сначала исправляется hierarchy/anchor selection.
 
 ## Rating
 
-Rating — opportunity score, не «качество монеты». Учитываются senior degree, retrace, свежесть от low, COMPLETE4H recovery, T1 convexity, liquidity/execution и fragility до strict origin.
+Rating — **opportunity score**, а не «качество монеты». Он учитывает:
 
-Для crypto W3-(2) 9.x требует действительно сильного durable recovery. `2/3 C4H` ограничивается `8.8`; слабая `3/3` recovery только выше `.618` ограничивается `8.4`. Это сделано по результатам подробного walk, где старые 9.x не показывали лучшего качества, чем 8.x.
+- wave type/degree;
+- retrace;
+- свежесть относительно working low;
+- COMPLETE4H recovery persistence;
+- strict-origin distance;
+- upside до T1;
+- liquidity rank как небольшой tie-breaker.
 
-## Search / Tracking
+Высокий rating не должен возникать только из-за label W3-(2). Слабая recovery ограничивает верхний score. После исправления hierarchy рейтинг снова проверяется `/walk`; его нельзя подгонять по одному BCH/GRAM примеру.
 
-- Search каждый раз скачивает/строит candles заново; candle/parquet cache отсутствует.
-- Accompaniment сопровождает только symbols последнего успешного Search.
-- W2 после acceptance W1 high больше не re-anchor'ится как global W2.
-- W3-(2) может re-anchor новым COMPLETE4H low выше strict origin, сохраняя frozen W3-(1) high.
-- Strict-origin break инвалидирует старый count немедленно.
+## Tracking
+
+`Сопровождение` работает только по symbols последнего Search. Оно может повысить сохранённую W2 до W3-(2), если тот же parent count развился соответствующим образом.
+
+Если COMPLETE4H уже принял цену выше projection high сохранённой коррекции, эта конкретная историческая структура блокируется от дальнейшего re-anchor. Следующий fresh setup появляется только через новый `Поиск`, а не путём переписывания прошлой сделки.
 
 ## /walk
 
-`/walk` изолирован от Search/Track и всегда использует:
+`/walk` — отдельная диагностика fixed 10 majors. Он не меняет Search/Track state.
 
-`BTC, ETH, SOL, BNB, XRP, DOGE, ADA, LINK, LTC, BCH`.
-
-Каждый COMPLETE4H проверяется без look-ahead. Для W3-(2) identity привязана к parent W2, поэтому re-anchor одной и той же senior correction не считается новым fresh signal. Future 1H используются только после фиксации fresh signal для T1/invalid/unresolved и MFE/MAE.
+Для W3-(2) diagnostic identity включает parent W2 и active W3-(1), чтобы новый действительно senior record-high leg был виден отдельно, а обычные re-observations одной коррекции подавлялись как duplicates.

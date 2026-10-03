@@ -112,7 +112,7 @@ def _confirmed_recovery_ratio(fib_status: str) -> float | None:
 def _row_values_flags(state: WaveState, rank: int | None) -> tuple[list[str], list[bool]]:
     """One source of truth for text and PNG rows.
 
-    v0015 deliberately uses sparse emphasis: bold/green means a genuinely favorable
+    v0017 deliberately uses sparse emphasis: bold/green means a genuinely favorable
     property, not merely a valid field. This keeps the image readable at a glance.
     """
     invalid = state.status in {"INVALID", "RECOUNT", "NO_SETUP", "DATA_INCOMPLETE"}
@@ -468,6 +468,14 @@ def _state_technical_lines(state: WaveState, rank: int | None) -> list[str]:
         f"  origin={_fmt(state.origin)}; impulse_high={_fmt(state.impulse_high)}; working_low={_fmt(state.working_low)}; strict_origin={_fmt(state.strict_origin)}",
         f"  retrace={'—' if state.retrace_depth is None else f'{state.retrace_depth * 100:.2f}%'}; strict_distance={'—' if state.strict_distance_pct is None else f'{state.strict_distance_pct:.2f}%'}; growth_from_low={'—' if state.growth_from_low_pct is None else f'{state.growth_from_low_pct:+.2f}%'}",
         f"  fibs: {fibs}",
+        (
+            "  target_projection: "
+            f"source={state.target_source or '—'}; "
+            f"origin={_fmt(state.target_origin)}; "
+            f"high={_fmt(state.target_impulse_high)}; "
+            f"length={_fmt(state.target_impulse_length)}; "
+            f"targets={' / '.join(_fmt(x) for x in state.targets) if state.targets else '—'}"
+        ),
         f"  last_complete4h={state.last_complete4h_bucket or '—'}; close={_fmt(state.last_complete4h_close)}",
         f"  timestamps: impulse_start={state.impulse_start_ts or '—'}; impulse_high={state.impulse_high_ts or '—'}; working_low={state.working_low_ts or '—'}",
     ]
