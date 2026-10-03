@@ -1,3 +1,5 @@
+# Historical v0018 synthetic geometry tests. These do NOT verify the named assets against parquet.
+# Real archive regressions are in test_v0019_regressions.py.
 from __future__ import annotations
 
 import pandas as pd
@@ -92,6 +94,7 @@ def test_same_symbol_accompaniment_can_promote_w2_to_w3_2():
         impulse_high=300.0,
         working_low=212.9,
         strict_origin=180.0,
+        working_low_ts="2026-09-15T16:00:00+00:00",
         current_price=311.0,
         rating=8.0,
         last_complete4h_bucket=None,
@@ -106,6 +109,7 @@ def test_same_symbol_accompaniment_can_promote_w2_to_w3_2():
         working_low=296.1,
         strict_origin=212.9,
         parent_w2_low=212.9,
+        parent_w2_ts="2026-09-15T16:00:00+00:00",
         w3_1_high=317.7,
         current_price=311.0,
         rating=9.3,

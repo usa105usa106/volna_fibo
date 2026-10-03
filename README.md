@@ -1,90 +1,61 @@
-# Telegram Senior Wave Scanner v0018 — flat GitHub edition
+# Telegram Senior Wave Scanner v0019
 
-Telegram-бот для поиска только **global/senior W2 и W3-(2)** по Binance Spot или MEXC Futures. Все файлы проекта лежат в корне — архив специально плоский для простой загрузки в GitHub/Coolify.
+Версия 0019 сделана на основе приложенного `senior-wave-bot-v0018-flat.zip`.
+Runtime-файлы остаются в корне. Папки `fixtures/` и `audit/` нужны для воспроизводимых проверок, а не для работы Telegram-бота.
 
-## Основной режим
+## Что изменилось
 
-- `● Поиск W2/W3-(2)` — каждый цикл собирает свежие данные и начинает scan с нуля. Search сам по себе не включает сопровождение.
-- `Сопровождение` — следит только за set последнего Search; новых symbols не добавляет.
-- `Top-100 / Top-200 / Top-300` — циклический тумблер crypto universe.
-- `30 мин / 1 час / 4 часа / 12 часов` — интервал следующего запуска считается **после завершения предыдущего анализа**.
-- `Binance Spot / MEXC Futures` — источник market data.
-- `Сброс` — останавливает цикл, очищает tracked state/temp data и возвращает defaults.
-- `Пинг` — latency, uptime, memory, version.
-- Ручной запрос: `DOGE` или `DOGE,POL,SOL` анализирует только указанные symbols с нуля.
+Исправлены смешение origin/parent при W3-(2), ложная связь волн по похожей цене, пропуск strict-origin break до вершины, выбор lower-high как окончания W1 и замораживание микро-отката без дневного подтверждения senior degree. Track учитывает новые lows в хронологическом порядке, включая low свечи breakout, и только затем фиксирует структуру/повышает её степень.
 
-XAU и USOIL анализируются дополнительно, если доступны на выбранной бирже. Их crypto/commodity duplicates (`XAUT`, `UKOIL`) не занимают места в crypto Top-N.
+Формула целей сохранена: `working_low + (1 / 1.618 / 2.618 / 4.236) × (high − origin)`.
+Все поля Fib, strict origin и target projection обязаны описывать один импульс. Достигнутые цели не предлагаются повторно. Подробности, исходные строки ошибок и сравнение с ручными примерами — в `AUDIT_v0019.md`.
 
-## Ответ бота
+**Числа 400.90 для BCH и 111.02 для USOIL не являются прошитыми целями.** Их наличие в старых искусственных тестах не доказывает такую разметку на реальных свечах. В архиве 09:25 crypto — Binance Spot, controls — MEXC Futures. Скриншоты MEXC нельзя сравнивать с Binance как одну и ту же историю.
 
-Основной анализ отправляет:
+## Обновление с 0018
 
-1. PNG-таблицу с вертикальными колонками;
-2. `.txt` с полным техническим разбором;
-3. подпись с временем анализа, выбранным Top-N, количеством ошибок и коротким summary лучших setups.
+1. Сохраните persistent volume `/data` и резервную копию SQLite.
+2. Разверните этот архив. Если в Coolify задан `BOT_VERSION`, поменяйте его на `0019` или удалите переопределение.
+3. Первый Track пересчитывает только уже сохранённые тикеры по правилам 0019. Старая структура при отсутствии подтверждения получает `RECOUNT`, её старые цели убираются. Исторический `INVALID` не оживает.
+4. Новый Search заменяет tracked-set только после успешной доставки нового отчёта и атомарного commit.
 
-Хорошие значения подсвечиваются выборочно; сам факт наличия цены/W2/W3-(2)/working low не делает всю строку жирной.
+Бот не размещает биржевые ордера. Изменение senior-фильтра намеренно делает выдачу консервативнее: вершина nested impulse должна соответствовать подтверждённому дневному pivot (тот же `daily_pivot_window=3`). Это может задерживать появление новой W3-(2); неподтверждённая локальная 4H-вершина больше не выдаётся за senior.
 
-## Что именно исправляет v0018
+## Запуск
 
-v0018 чинит **не коэффициенты целей, а выбор projection anchors**. Формула `1.000 / 1.618 / 2.618 / 4.236` в v0017 уже была правильной, но live MEXC мог подменить W3-(1) более поздним record-high/одиночным futures wick. Поэтому BCH при working low около `296.49` получал T1 `450.47` вместо района `400.90`, а USOIL — T1 `122.83` вместо `111.02`.
-
-Новая логика:
-
-- W3-(1) фиксируется на **первом senior structural impulse**, который после parent W2 реально сформировал валидную W3-(2);
-- после появления W3-(2) последующие continuation highs больше не имеют права переписывать W3-(1) и раздувать цели;
-- одинокие MEXC upper-wicks без close/peer confirmation не становятся senior projection high;
-- слишком ранние 4H micro-legs отсекаются минимальной длительностью senior impulse;
-- daily/global child, чей origin доказан как предыдущая senior W2, автоматически повышается до W3-(1)→W3-(2) — это GRAM-like случай;
-- `W2` по-прежнему считает targets только от W1, `W3-(2)` — только от parent W2 → frozen W3-(1);
-- если nested anchors неоднозначны, бот делает `RECOUNT`, а не публикует красивую, но ложную математику.
-
-В `.txt` сохраняется `target_projection: source/origin/high/length`, поэтому теперь можно сразу увидеть не только конечные цели, но и точные anchors, которыми они были построены.
-
-## Golden references в тестах
-
-v0018 содержит regressions на сохранённые parquet/manual anchors:
-
-```text
-BCH   W3-(2) targets: 400.90 / 465.6664 / 570.4664 / 740.0328
-GRAM  W3-(2) targets: 1.914 / 2.194572 / 2.648572 / 3.383144
-USOIL W3-(2) targets: 111.02 / 125.05478 / 147.76478 / 184.50956
-DOGE  W3-(2) targets: 0.11871 / 0.13575444 / 0.16333444 / 0.20795888
-```
-
-Это regression anchors, а не symbol-specific production overrides: код не содержит `if BCH`/`if GRAM` для принудительной разметки.
-
-## /walk v0018
-
-`/walk` использует фиксированный diagnostic universe:
-
-```text
-BTC, ETH, SOL, BNB, XRP, DOGE, ADA, LINK, LTC, BCH
-```
-
-Он создаёт подробный `.txt` для полировки детектора: first/last seen, wave type, anchors, retrace, Fib, rating, targets, T1/invalid/unresolved, MFE/MAE до resolution и за 30 дней.
-
-`/walk` не меняет Search/Track timers/state. Для W3-(2) dedupe идёт по senior parent W2: higher highs внутри уже идущей W3 не создают новые «fresh» W3-(2) и не раздувают статистику.
-
-## Coolify
-
-Минимально требуется:
-
-```text
-BOT_TOKEN=ваш_токен_от_BotFather
-```
-
-Persistent volume `/data` рекомендуется, но для самого запуска не обязателен. Без него состояние SQLite может исчезнуть при recreate/redeploy контейнера.
-
-Пример Docker:
+Минимальная переменная — `BOT_TOKEN`. Остальные параметры и defaults перечислены в `.env.example`.
 
 ```bash
-docker build -t senior-wave-bot:0018 .
-docker run --rm -e BOT_TOKEN='...' -v senior_wave_data:/data senior-wave-bot:0018
+cp .env.example .env
+# Заполнить BOT_TOKEN в .env.
+docker compose up --build -d
 ```
 
-## Проверка
+Для Coolify используйте Dockerfile, один экземпляр процесса long polling и volume `/data`. SQLite сохраняет настройки и tracked-set. При нескольких репликах с одним Telegram token long polling конфликтует; реплики этой версии не предусмотрены.
 
-В среде сборки выполняются syntax/compile и доступные regression tests. Полный pytest требует runtime/dev dependencies (`aiogram`, `aiosqlite` и др.). Если они отсутствуют и внешний pip недоступен, проект не заявляет фиктивный full-suite PASS.
+Search перебирает выбранные Top-100/200/300, Track обновляет последний успешно сохранённый набор. XAU/USOIL берутся только с выбранной биржи; отсутствие не подменяется прокси-тикером. Ручной ввод `doge,pol,sol` не меняет рабочую сессию. `/walk` проверяет фиксированные 10 majors и не меняет tracked-set или таймер. Автоматический интервал отсчитывается от успешной доставки всего отчёта.
 
-Версия: **0018**.
+## Проверки
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+python -m ruff check . --select E9,F
+python -m compileall -q .
+python -m bandit -r . -x './test*,./conftest.py'
+```
+
+`test_v0019_regressions.py` читает реальные parquet из `fixtures/market_0925/`; файлы содержат неизменённые строки 15 активов исходного архива. SHA256 и происхождение сохранены в `provenance.json`. Старые `test_v0018_*` сохранены как искусственные unit tests, а не доказательство ручной разметки.
+
+## Offline replay
+
+Никакой сети, Telegram, SQLite или изменения production settings:
+
+```bash
+python replay_archive.py /path/to/extracted_archive --output /path/to/replay
+python replay_archive.py fixtures/market_0925 --symbols DOGE,BCH,LTC,GRAM,XAU,USOIL --output /path/to/replay
+```
+
+Получаются `states.json`, полный `audit.txt` и `table.png`. В полном архиве 09:25 проверены 300 crypto и 2 controls. Offline replay использует зафиксированные snapshot ranks и не является проверкой доходности без информации из будущего. Для исторических cutoffs цены берутся из закрытых свечей, а не из более позднего live ticker.
+
+Рейтинг — эвристический opportunity score 0–10. Его числовая шкала не является вероятностью достижения цели. Walk v0013 не использовался для подгонки рейтинга 0019; новый live walk требует доступного API и полной истории.

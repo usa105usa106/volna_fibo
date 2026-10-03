@@ -39,7 +39,7 @@ def sample_state(symbol="DOGSUSDT", rating=9.1, control=False):
 
 
 def test_v0018_version_is_default():
-    assert Settings(BOT_TOKEN="test", _env_file=None).bot_version == "0018"
+    assert Settings(BOT_TOKEN="test", _env_file=None).bot_version == "0019"
 
 
 def test_commodity_duplicates_are_excluded_from_crypto_top():
@@ -61,7 +61,7 @@ def test_png_table_is_high_resolution_vertical_column_table_and_preserves_tiny_p
         title="ПОИСК W2 / W3-(2)",
         subtitle="MEXC Futures · Top-300",
         crypto_label="TOP-10 CRYPTO",
-        version="0018",
+        version="0019",
     )
     image = Image.open(BytesIO(data))
     assert image.width >= 2400
@@ -91,7 +91,7 @@ def test_runtime_declares_pillow_and_dejavu_font():
     assert "Pillow==12.3.0" in requirements
     assert "Pillow==12.3.0" in lock
     assert "fonts-dejavu-core" in docker
-    assert 'org.opencontainers.image.version="0018"' in docker
+    assert 'org.opencontainers.image.version="0019"' in docker
 
 
 def test_v0018_highlighting_is_sparse_and_only_marks_strong_properties():

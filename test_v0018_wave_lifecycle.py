@@ -1,3 +1,5 @@
+# Historical v0018 synthetic geometry tests. These do NOT verify the named assets against parquet.
+# Real archive regressions are in test_v0019_regressions.py.
 from __future__ import annotations
 
 import pandas as pd

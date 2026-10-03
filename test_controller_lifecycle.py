@@ -29,7 +29,7 @@ def setup_controller(cfg, repo):
         )
     )
     controller = BotController(cfg, repo, scanner)
-    controller.bot = SimpleNamespace(send_message=AsyncMock())
+    controller.bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock(), send_document=AsyncMock())
     return controller, scanner
 
 
@@ -46,7 +46,7 @@ async def test_second_chat_cannot_start_search_while_first_report_pending(cfg, r
         entered.set()
         await release.wait()
 
-    controller.bot.send_message = send
+    controller.bot.send_document = send
     task = asyncio.create_task(controller.run_and_report("search", 1))
     await asyncio.wait_for(entered.wait(), 2)
     assert [s.symbol for s in await repo.tracked_states()] == ["OLDUSDT"]
@@ -107,7 +107,7 @@ async def test_reset_cancels_active_top300_and_no_late_commit(cfg, repo):
     )
     scanner = ScannerService(cfg, repo, data)
     controller = BotController(cfg, repo, scanner)
-    controller.bot = SimpleNamespace(send_message=AsyncMock())
+    controller.bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock(), send_document=AsyncMock())
     scheduler = DynamicScheduler(repo, controller.scheduled_run)
     controller.set_scheduler(scheduler)
     scheduler.start()
@@ -178,7 +178,7 @@ async def test_failed_delivery_preserves_old_set_and_anchor(cfg, repo):
     )
     before = asdict(await repo.get_settings())
     controller, scanner = setup_controller(cfg, repo)
-    controller.bot.send_message = AsyncMock(
+    controller.bot.send_document = AsyncMock(
         side_effect=TelegramNetworkError(
             method=SendMessage(chat_id=1, text="x"), message="offline"
         )
@@ -196,7 +196,7 @@ async def test_successful_delivery_anchor_is_after_final_send(cfg, repo):
     async def send(*args, **kwargs):
         completed.append(datetime.now(timezone.utc))
 
-    controller.bot.send_message = send
+    controller.bot.send_document = send
     assert await controller.run_and_report("search", 1)
     settings = await repo.get_settings()
     assert datetime.fromisoformat(settings.last_run_search) >= completed[-1]
@@ -216,7 +216,7 @@ async def test_broadcast_blocked_chat_does_not_starve_healthy_chat(cfg, repo):
             )
         sent.append(cid)
 
-    controller.bot.send_message = send
+    controller.bot.send_document = send
     assert await controller.scheduled_run("search")
     assert sent == [2]
     assert await repo.report_chats() == {2}
@@ -238,7 +238,7 @@ async def test_temporary_broadcast_failure_preserves_all_recipient_commit_policy
             )
         sent.append(cid)
 
-    controller.bot.send_message = send
+    controller.bot.send_document = send
     assert await controller.scheduled_run("search") is False
     assert sent == [2]
     assert [s.symbol for s in await repo.tracked_states()] == ["OLDUSDT"]
@@ -281,7 +281,7 @@ async def test_reset_interrupts_telegram_retry_sleep(cfg, repo):
             method=SendMessage(chat_id=1, text="x"), message="limited", retry_after=120
         )
 
-    controller.bot.send_message = send
+    controller.bot.send_document = send
     await controller._action(message(1), "search")
     await asyncio.wait_for(entered.wait(), 2)
     await asyncio.wait_for(controller._reset(message(2)), 2)

@@ -52,7 +52,9 @@ def complete4h(hourly_closed: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=columns)
     df = hourly_closed.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-    df = df.sort_values("timestamp").drop_duplicates("timestamp", keep="last")
+    if df["timestamp"].duplicated().any():
+        raise DataIntegrityError("1h: duplicate timestamp in COMPLETE4H input")
+    df = df.sort_values("timestamp")
 
     # Four rows in one floor('4h') bucket are not enough by themselves: malformed or
     # offset timestamps (e.g. 00:30/01:30/02:30/03:30) must never become a senior C4H.
@@ -60,6 +62,7 @@ def complete4h(hourly_closed: pd.DataFrame) -> pd.DataFrame:
         df["timestamp"].dt.minute.eq(0)
         & df["timestamp"].dt.second.eq(0)
         & df["timestamp"].dt.microsecond.eq(0)
+        & df["timestamp"].dt.nanosecond.eq(0)
     )
     df = df.loc[aligned].copy()
     if df.empty:
@@ -127,7 +130,7 @@ def _fib_status(close: float, fibs: dict[str, float], recent_closes: Iterable[fl
     for ratio, level in thresholds:
         if close >= level:
             holds = sum(1 for c in recent if c >= level)
-            suffix = f" · {holds}/{len(recent)} C4H" if recent else ""
+            suffix = f" · {holds}/3 C4H" if recent else ""
             ratio_text = f"{ratio:.3f}".split(".")[1]
             return f"> .{ratio_text}{suffix}", holds
     return "< .950", 0
@@ -161,6 +164,38 @@ def _zones(working_low: float, high: float, strict_origin: float) -> tuple[tuple
 
 def _targets(working_low: float, impulse_length: float) -> list[float]:
     return [working_low + m * impulse_length for m in TARGET_MULTIPLIERS]
+
+
+def _utc(value) -> pd.Timestamp:
+    ts = pd.Timestamp(value)
+    return ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+
+
+def _origin_bucket(h4: pd.DataFrame, day, price: float):
+    """Resolve a daily origin to the actual COMPLETE4H candle, never a nearby price."""
+    day = _utc(day).floor("D")
+    matches = h4[(h4["timestamp"] >= day) & (h4["timestamp"] < day + pd.Timedelta(days=1))]
+    matches = matches[matches["low"].map(lambda x: math.isclose(float(x), price, rel_tol=1e-9, abs_tol=0.0))]
+    return matches["timestamp"].iloc[0] if not matches.empty else None
+
+
+def _recovery(h4: pd.DataFrame, fibs: dict[str, float], low_ts) -> tuple[str, int]:
+    # A new working low resets the confirmation window. Earlier closes belong to
+    # the old correction and must not manufacture 3/3 acceptance for a fresh low.
+    rows = h4 if low_ts is None else h4[h4["timestamp"] >= _utc(low_ts)]
+    return _fib_status(float(h4["close"].iloc[-1]), fibs, rows["close"].tail(3))
+
+
+def _reached_targets(snapshot: MarketSnapshot, low_ts, targets: list[float]) -> list[int]:
+    # Exclude the anchor bucket: OHLC cannot tell whether its high preceded its low.
+    after = snapshot.hourly_closed
+    if low_ts is None or after.empty:
+        return []
+    after = after[pd.to_datetime(after["timestamp"], utc=True) >= _utc(low_ts) + pd.Timedelta(hours=4)]
+    high = float(after["high"].max()) if not after.empty else -math.inf
+    if snapshot.live_price is not None:
+        high = max(high, snapshot.live_price)
+    return [i for i, target in enumerate(targets, 1) if high >= target]
 
 
 def _target_projection_anchors(
@@ -198,7 +233,7 @@ def _target_projection_anchors(
         return None
     lo = float(lo)
     hi = float(hi)
-    if not math.isfinite(lo) or not math.isfinite(hi) or hi <= lo:
+    if not math.isfinite(lo) or not math.isfinite(hi) or lo <= 0 or hi <= lo:
         return None
     return lo, hi, source
 
@@ -230,6 +265,8 @@ def _project_targets(
     if anchors is None:
         return None
     anchor_origin, anchor_high, source = anchors
+    if not anchor_origin < float(working_low) < anchor_high:
+        return None
     length = anchor_high - anchor_origin
     targets = _targets(float(working_low), length)
     if len(targets) != 4 or any(
@@ -363,10 +400,12 @@ def _rating(
         elif "2/3 C4H" in fib_status:
             score = min(score, 8.8)
         elif "3/3 C4H" in fib_status:
-            if any(marker in fib_status for marker in ("> .618", "> .705", "> .786", "> .886", "> .950")):
-                score = min(score, 8.4)
-            elif "> .500" in fib_status or "> .5" in fib_status:
+            if "> .500" in fib_status or "> .5" in fib_status:
                 score = min(score, 8.9)
+        # Weak-level cap applies at EVERY persistence count. Otherwise a stronger
+        # third close reduced the score from 8.8 to 8.4 (non-monotone recovery).
+        if any(marker in fib_status for marker in ("> .618", "> .705", "> .786", "> .886", "> .950")):
+            score = min(score, 8.4)
 
     return round(max(0.0, min(10.0, score)), 1)
 
@@ -414,20 +453,29 @@ class SeniorWaveDetector:
                 if hi <= li:
                     continue
                 high_day_ts = daily.at[hi, "timestamp"]
-                if high_day_ts < h4["timestamp"].iloc[0]:
-                    continue
                 days = (high_day_ts - origin_ts).days
                 if days < 1 or days > 120:
                     continue
                 high = float(daily.at[hi, "high"])
+                # The endpoint of a rising impulse cannot be a lower high after
+                # an already higher extreme inside that same impulse.
+                if float(daily.loc[li:hi, "high"].max()) > high:
+                    continue
                 peak_day = h4[
                     (h4["timestamp"] >= high_day_ts)
                     & (h4["timestamp"] < high_day_ts + pd.Timedelta(days=1))
                 ]
                 peaks = peak_day[peak_day["high"] == high]
                 if peaks.empty:
-                    continue
-                peak_ts = peaks["timestamp"].iloc[0]
+                    # Older daily peaks remain context for a W2 whose exact low IS
+                    # visible on COMPLETE4H. Never synthesize four-hour candles.
+                    if high_day_ts >= h4["timestamp"].iloc[0].floor("D") + pd.Timedelta(days=1):
+                        continue
+                    peak_ts = high_day_ts
+                    context_only = True
+                else:
+                    peak_ts = peaks["timestamp"].iloc[0]
+                    context_only = False
                 if float(daily.loc[li:hi, "low"].min()) < origin:
                     continue
                 length = high - origin
@@ -437,6 +485,26 @@ class SeniorWaveDetector:
                 if impulse_pct < self.cfg.min_global_impulse_pct:
                     continue
                 if atr > 0 and length < self.cfg.min_global_atr_mult * atr:
+                    continue
+
+                # A W1 that already produced a qualifying W2 cannot be extended
+                # retrospectively across that correction to a later W3 high.
+                consumed = False
+                for earlier in highs:
+                    if not li < earlier < hi:
+                        continue
+                    prior_high = float(daily.at[earlier, "high"])
+                    prior_len = prior_high - origin
+                    between = daily.loc[earlier + 1:hi - 1]
+                    if between.empty or prior_len <= 0 or prior_high / origin - 1 < self.cfg.min_global_impulse_pct:
+                        continue
+                    if atr > 0 and prior_len < self.cfg.min_global_atr_mult * atr:
+                        continue
+                    depth = (prior_high - float(between["low"].min())) / prior_len
+                    if self.cfg.min_w2_retrace <= depth <= self.cfg.max_w2_retrace:
+                        consumed = True
+                        break
+                if consumed:
                     continue
 
                 after = h4[h4["timestamp"] > peak_ts]
@@ -449,20 +517,33 @@ class SeniorWaveDetector:
                     w2_locked = False
                 else:
                     breakout_ts = accepted["timestamp"].iloc[0]
-                    correction = after[after["timestamp"] < breakout_ts]
+                    # The breakout candle's LOW occurs before its closing acceptance.
+                    correction = after[after["timestamp"] <= breakout_ts]
                     w2_locked = True
                 if len(correction) < 2:
                     continue
                 low_idx = correction["low"].idxmin()
                 w2_low = float(h4.at[low_idx, "low"])
                 w2_ts = h4.at[low_idx, "timestamp"]
+                if context_only:
+                    # Daily candles prove that the missing prefix contained neither
+                    # a lower correction low nor an earlier closing breakout. Exact
+                    # timing of the CURRENT W2 still comes solely from COMPLETE4H.
+                    prefix = daily[(daily["timestamp"] >= high_day_ts)
+                                   & (daily["timestamp"] < h4["timestamp"].iloc[0].floor("D") + pd.Timedelta(days=1))]
+                    if prefix.empty or float(prefix["low"].min()) <= w2_low:
+                        continue
+                    # Daily close below the level does NOT exclude a hidden 4H
+                    # closing breakout earlier that day. Daily HIGH must be <= it.
+                    if (prefix["high"] > high).any():
+                        continue
                 retrace = (high - w2_low) / length
                 if w2_low <= origin or not (self.cfg.min_w2_retrace <= retrace <= self.cfg.max_w2_retrace):
                     continue
                 result.append(
                     {
                         "origin": origin,
-                        "origin_ts": origin_ts,
+                        "origin_ts": _origin_bucket(h4, origin_ts, origin) or origin_ts,
                         "high": high,
                         "high_ts": peak_ts,
                         "w2_low": w2_low,
@@ -471,15 +552,18 @@ class SeniorWaveDetector:
                         "w2_locked": w2_locked,
                         "breakout_ts": breakout_ts,
                         "impulse_pct": impulse_pct,
+                        "high_context_only": context_only,
                     }
                 )
         return result
 
     @staticmethod
-    def _same_level(a: float | None, b: float | None, *, rel: float = 0.03) -> bool:
+    def _same_level(a: float | None, b: float | None, *, rel: float = 1e-9) -> bool:
         if a is None or b is None:
             return False
-        scale = max(abs(float(a)), abs(float(b)), 1e-12)
+        scale = max(abs(float(a)), abs(float(b)))
+        if scale == 0:
+            return a == b
         return abs(float(a) - float(b)) / scale <= rel
 
     def _structural_high_ok(self, h4: pd.DataFrame, idx: int) -> bool:
@@ -561,6 +645,9 @@ class SeniorWaveDetector:
                 continue
             if not self._same_level(child.get("origin"), parent_low):
                 continue
+            origin_ts = child.get("origin_ts")
+            if origin_ts is None or _origin_bucket(h4, origin_ts, parent_low) != parent_ts:
+                continue
 
             high_ts = pd.Timestamp(child["high_ts"])
             low_ts = pd.Timestamp(child["w2_ts"])
@@ -580,6 +667,8 @@ class SeniorWaveDetector:
             low = float(child["w2_low"])
             if high <= origin or low <= origin or low >= high:
                 continue
+            if not self._nested_impulse_is_senior(high, parent):
+                continue
 
             # Full daily child geometry has already passed global amplitude/ATR
             # filters.  It is therefore a stronger degree proof than the old coarse
@@ -596,6 +685,7 @@ class SeniorWaveDetector:
 
             eligible.append({
                 "origin": origin,
+                "origin_ts": parent_ts,
                 "high": high,
                 "high_ts": high_ts,
                 "low": low,
@@ -606,8 +696,9 @@ class SeniorWaveDetector:
 
         if not eligible:
             return None
-        # Prefer the latest completed child geometry; its own anchors stay frozen.
-        eligible.sort(key=lambda c: pd.Timestamp(c["high_ts"]), reverse=True)
+        # Same lifecycle as the primary path: later children cannot rewrite a
+        # projection already confirmed for the same parent.
+        eligible.sort(key=lambda c: pd.Timestamp(c["high_ts"]))
         return eligible[0]
 
     def _origin_is_prior_w2_h4(self, h4: pd.DataFrame, child: dict) -> bool:
@@ -621,11 +712,9 @@ class SeniorWaveDetector:
         raw_ts = child.get("origin_ts")
         if raw_ts is None or not math.isfinite(origin) or origin <= 0:
             return False
-        origin_ts = pd.Timestamp(raw_ts)
-        if origin_ts.tzinfo is None:
-            origin_ts = origin_ts.tz_localize("UTC")
-        else:
-            origin_ts = origin_ts.tz_convert("UTC")
+        origin_ts = _origin_bucket(h4, raw_ts, origin)
+        if origin_ts is None:
+            return False
 
         pre = h4[(h4["timestamp"] < origin_ts) & (h4["timestamp"] >= origin_ts - pd.Timedelta(days=120))].copy()
         if len(pre) < 8:
@@ -652,7 +741,7 @@ class SeniorWaveDetector:
             post_low = float(post["low"].min())
             # The child origin must actually be the correction low, not merely some
             # later arbitrary daily low in the same broad range.
-            if abs(post_low - origin) / max(origin, 1e-12) > 0.03:
+            if not self._same_level(post_low, origin):
                 continue
 
             before = h4[(h4["timestamp"] < high_ts) & (h4["timestamp"] >= high_ts - pd.Timedelta(days=120))]
@@ -691,7 +780,7 @@ class SeniorWaveDetector:
             # Direct COMPLETE4H hierarchy is authoritative.  Global-lineage is a
             # fallback for cases where the same nested leg also appears as a daily
             # W1/W2 candidate (GRAM-like geometry).
-            nested = self._detect_nested(h4, g)
+            nested = self._detect_nested(h4, g, daily=daily)
             if nested is None:
                 nested = self._lineage_nested(h4, g, global_candidates)
 
@@ -707,6 +796,7 @@ class SeniorWaveDetector:
                         if self.cfg.min_nested_retrace <= child_retrace <= self.cfg.max_nested_retrace:
                             nested = {
                                 "origin": float(g["origin"]),
+                                "origin_ts": _origin_bucket(h4, g["origin_ts"], float(g["origin"])),
                                 "high": float(g["high"]),
                                 "high_ts": g["high_ts"],
                                 "low": float(g["w2_low"]),
@@ -721,13 +811,13 @@ class SeniorWaveDetector:
                     origin=nested["origin"],
                     impulse_high=nested["high"],
                     working_low=nested["low"],
-                    strict_origin=g["w2_low"],
-                    impulse_start_ts=g["w2_ts"],
+                    strict_origin=nested["origin"],
+                    impulse_start_ts=nested.get("origin_ts", g["w2_ts"]),
                     impulse_high_ts=nested["high_ts"],
                     working_low_ts=nested["low_ts"],
                     retrace=nested["retrace"],
-                    parent_w2_low=g["w2_low"],
-                    parent_w2_ts=g["w2_ts"],
+                    parent_w2_low=nested["origin"],
+                    parent_w2_ts=nested.get("origin_ts", g["w2_ts"]),
                     w3_1_high=nested["high"],
                     w3_1_high_ts=nested["high_ts"],
                     h4=h4,
@@ -736,6 +826,13 @@ class SeniorWaveDetector:
                     is_control=snapshot.symbol in {"XAU", "USOIL"},
                 )
                 if state is not None:
+                    state.structure_evidence = {
+                        "route": nested["source"],
+                        "daily_origin": g["origin"], "daily_origin_ts": _iso(g["origin_ts"]),
+                        "daily_high": g["high"], "daily_high_ts": _iso(g["high_ts"]),
+                        "daily_high_context_only": g.get("high_context_only", False),
+                        "parent_low": g["w2_low"], "parent_low_ts": _iso(g["w2_ts"]),
+                    }
                     ranked_states.append(
                         ((3.0, pd.Timestamp(g["w2_ts"]).timestamp(), float(g.get("impulse_pct", 0.0))), state)
                     )
@@ -745,6 +842,11 @@ class SeniorWaveDetector:
             # developing wave. Keep it out of fresh Search unless a nested W3-(2) can
             # be identified. This prevents late W3/W4 price action from becoming W2.
             if g.get("w2_locked", False):
+                continue
+
+            if g.get("high_context_only", False):
+                # A daily-context parent can prove ancestry, but cannot itself be
+                # published as a fresh C4H-anchored W2 with invented peak timing.
                 continue
 
             state = self._build_state(
@@ -768,6 +870,7 @@ class SeniorWaveDetector:
                 is_control=snapshot.symbol in {"XAU", "USOIL"},
             )
             if state is not None:
+                state.structure_evidence = {"route": "DAILY_W1_COMPLETE4H_W2", "daily_high_context_only": False}
                 ranked_states.append(
                     ((2.0, pd.Timestamp(g["w2_ts"]).timestamp(), float(g.get("impulse_pct", 0.0))), state)
                 )
@@ -777,7 +880,7 @@ class SeniorWaveDetector:
         ranked_states.sort(key=lambda item: item[0], reverse=True)
         return ranked_states[0][1]
 
-    def _detect_nested(self, h4: pd.DataFrame, g: dict) -> dict | None:
+    def _detect_nested(self, h4: pd.DataFrame, g: dict, daily: pd.DataFrame | None = None) -> dict | None:
         """Return the senior W3-(1) -> W3-(2) map with frozen impulse anchors.
 
         The decisive v0018 change is lifecycle ordering.  W3-(1) is the *first
@@ -835,6 +938,17 @@ class SeniorWaveDetector:
         if not candidates:
             return None
 
+        if daily is not None and not daily.empty:
+            # A local 4H pivot is insufficient evidence of senior degree. Use the
+            # same closed daily context/pivot window as the parent W1 detector.
+            mask = _pivot_mask(daily["high"], self.cfg.daily_pivot_window, "high")
+            senior_peaks = daily.loc[mask.fillna(False), ["timestamp", "high"]]
+            candidates = [c for c in candidates if any(
+                _utc(row.timestamp).floor("D") == _utc(c["high_ts"]).floor("D")
+                and self._same_level(float(row.high), c["high"])
+                for row in senior_peaks.itertuples()
+            )]
+
         # IMPORTANT: chronological order.  The first senior impulse that actually
         # produces a valid correction owns the W3-(1) anchor.  Later highs belong to
         # the continuation and cannot retarget the already established W3-(2).
@@ -850,7 +964,7 @@ class SeniorWaveDetector:
                 continue
 
             accepted = tail[tail["close"] > high]
-            correction = tail if accepted.empty else tail[tail["timestamp"] < accepted["timestamp"].iloc[0]]
+            correction = tail if accepted.empty else tail[tail["timestamp"] <= accepted["timestamp"].iloc[0]]
             if len(correction) < 2:
                 continue
             if float(correction["low"].min()) <= parent_low:
@@ -868,6 +982,7 @@ class SeniorWaveDetector:
 
             return {
                 "origin": parent_low,
+                "origin_ts": parent_ts,
                 "high": high,
                 "high_ts": high_ts,
                 "low": working_low,
@@ -904,10 +1019,10 @@ class SeniorWaveDetector:
         h1 = snapshot.hourly_closed.copy()
         if not h1.empty:
             h1["timestamp"] = pd.to_datetime(h1["timestamp"], utc=True)
-            cut_from = pd.Timestamp(impulse_high_ts)
+            cut_from = _utc(impulse_start_ts)
             if cut_from.tzinfo is None:
                 cut_from = cut_from.tz_localize("UTC")
-            relevant_h1 = h1[h1["timestamp"] > cut_from]
+            relevant_h1 = h1[h1["timestamp"] >= cut_from]
             if not relevant_h1.empty and float(relevant_h1["low"].min()) < strict_origin:
                 return None
         if snapshot.live_low is not None and snapshot.live_low < strict_origin:
@@ -917,7 +1032,7 @@ class SeniorWaveDetector:
 
         fibs = _fib_prices(origin, impulse_high)
         last_close = float(h4["close"].iloc[-1])
-        status, _ = _fib_status(last_close, fibs, h4["close"].tail(3).tolist())
+        status, _ = _recovery(h4, fibs, working_low_ts)
         growth = (live / working_low - 1) * 100 if working_low else math.nan
         strict_distance = (working_low / strict_origin - 1) * 100 if strict_origin else math.nan
         projection = _project_targets(
@@ -933,6 +1048,11 @@ class SeniorWaveDetector:
             # than returning no setup: targets are part of the trading decision.
             return None
         targets, target_origin, target_high, target_length, target_source = projection
+        # Fib, strict invalidation and targets must describe the SAME impulse.
+        if not (self._same_level(origin, target_origin) and self._same_level(strict_origin, target_origin)
+                and self._same_level(impulse_high, target_high)):
+            return None
+        targets_hit = _reached_targets(snapshot, working_low_ts, targets)
         t1_upside = ((targets[0] / live) - 1) * 100 if targets and live > 0 else None
         rating = _rating(
             retrace, growth, strict_distance, status, liquidity_rank, top_n, wave_type, t1_upside
@@ -943,7 +1063,7 @@ class SeniorWaveDetector:
             symbol=snapshot.symbol,
             exchange=snapshot.exchange,
             wave_type=wave_type,  # type: ignore[arg-type]
-            status=_status_from_state(growth, status),  # type: ignore[arg-type]
+            status="EXTENDED" if targets_hit else _status_from_state(growth, status),  # type: ignore[arg-type]
             origin=origin,
             impulse_high=impulse_high,
             working_low=working_low,
@@ -963,6 +1083,7 @@ class SeniorWaveDetector:
             target_impulse_high=target_high,
             target_impulse_length=target_length,
             target_source=target_source,
+            targets_hit=targets_hit,
             base_zone=base,
             deep_zone=deep,
             current_price=live,
@@ -989,6 +1110,7 @@ class SeniorWaveDetector:
         previous.fibs = {}
         previous.fib_status = fib_status
         previous.targets = []
+        previous.targets_hit = []
         previous.target_origin = None
         previous.target_impulse_high = None
         previous.target_impulse_length = None
@@ -1021,7 +1143,7 @@ class SeniorWaveDetector:
         if previous.wave_type == "CONTROL" or previous.status == "NO_SETUP":
             found = self.detect(snapshot, previous.liquidity_rank, top_n)
             if found:
-                found.is_control = True
+                found.is_control = previous.is_control
                 found.last_event = "CONTROL_SETUP_FOUND"
                 return found
             previous.current_price = snapshot.live_price
@@ -1066,30 +1188,24 @@ class SeniorWaveDetector:
             previous.updated_at = now
             return previous
 
-        # A saved global W2 is allowed to progress into a nested W3-(2) on the *same*
-        # symbol.  Accompaniment must not be frozen at the degree found on day one.
-        # We still do not discover any new symbols here; this is only a same-parent
-        # hierarchy upgrade after COMPLETE4H confirms W3-(1) and its correction.
-        if previous.wave_type == "W2" and previous.working_low is not None:
-            promoted = self.detect(snapshot, previous.liquidity_rank, top_n)
-            if (
-                promoted is not None
-                and promoted.wave_type == "W3-(2)"
-                and promoted.parent_w2_low is not None
-                and math.isclose(
-                    promoted.parent_w2_low, previous.working_low, rel_tol=0.003, abs_tol=1e-12
-                )
-            ):
-                promoted.is_control = previous.is_control
-                promoted.created_at = previous.created_at or promoted.created_at
-                promoted.last_event = "PROMOTED W2 → W3-(2)"
-                return promoted
-
         last_seen = pd.Timestamp(previous.last_complete4h_bucket) if previous.last_complete4h_bucket else None
         if last_seen is not None:
             last_seen = last_seen.tz_localize("UTC") if last_seen.tzinfo is None else last_seen.tz_convert("UTC")
             if h4["timestamp"].iloc[-1] < last_seen:
                 raise DataIntegrityError("tracking COMPLETE4H checkpoint moved backwards")
+
+        if previous.detector_version != "0019":
+            rebuilt = self.detect(snapshot, previous.liquidity_rank, top_n)
+            if rebuilt is not None:
+                rebuilt.is_control = previous.is_control
+                rebuilt.created_at = previous.created_at or rebuilt.created_at
+                rebuilt.last_event = "V0019 SAME-SYMBOL RECOUNT — LEGACY ANCHORS REPLACED"
+                return rebuilt
+            previous.status = "RECOUNT"
+            self._clear_derived(previous, fib_status="V0019 RECOUNT REQUIRED")
+            previous.last_event = "V0019 — LEGACY ANCHORS NOT CONFIRMED"
+            previous.updated_at = now
+            return previous
         new_h4 = h4 if last_seen is None else h4[h4["timestamp"] > last_seen]
         if not new_h4.empty and float(new_h4["low"].min()) < strict:
             previous.status = "INVALID"
@@ -1103,6 +1219,7 @@ class SeniorWaveDetector:
         # low/targets stable in accompaniment; do not re-anchor it to an unrelated
         # later pullback. Fresh Search will independently find the next active setup.
         structure_locked = False
+        eligible_h4 = new_h4
         if previous.impulse_high is not None and previous.wave_type in {"W2", "W3-(2)"}:
             lock_from_raw = previous.working_low_ts or previous.impulse_high_ts
             if lock_from_raw:
@@ -1111,18 +1228,34 @@ class SeniorWaveDetector:
                     lock_from = lock_from.tz_localize("UTC")
                 else:
                     lock_from = lock_from.tz_convert("UTC")
-                structure_locked = bool(
-                    not h4[(h4["timestamp"] > lock_from) & (h4["close"] > float(previous.impulse_high))].empty
-                )
+                accepted = h4[(h4["timestamp"] > lock_from) & (h4["close"] > float(previous.impulse_high))]
+                if not accepted.empty:
+                    structure_locked = True
+                    eligible_h4 = new_h4[new_h4["timestamp"] <= accepted["timestamp"].iloc[0]]
 
         reanchored = False
-        if not structure_locked and not new_h4.empty and previous.working_low is not None:
-            idx = new_h4["low"].idxmin()
+        if not eligible_h4.empty and previous.working_low is not None:
+            idx = eligible_h4["low"].idxmin()
             candidate_low = float(h4.at[idx, "low"])
             if strict < candidate_low < previous.working_low:
                 previous.working_low = candidate_low
                 previous.working_low_ts = _iso(h4.at[idx, "timestamp"])
                 reanchored = True
+
+        # Promote only AFTER all earlier lows in this batch have been applied.
+        # Identity includes time and price; revisiting the same price is not lineage.
+        if previous.wave_type == "W2" and previous.working_low is not None:
+            promoted = self.detect(snapshot, previous.liquidity_rank, top_n)
+            if (
+                promoted is not None and promoted.wave_type == "W3-(2)"
+                and self._same_level(promoted.parent_w2_low, previous.working_low)
+                and promoted.parent_w2_ts is not None and previous.working_low_ts is not None
+                and _utc(promoted.parent_w2_ts) == _utc(previous.working_low_ts)
+            ):
+                promoted.is_control = previous.is_control
+                promoted.created_at = previous.created_at or promoted.created_at
+                promoted.last_event = "PROMOTED W2 → W3-(2)"
+                return promoted
 
         origin = previous.origin
         high = previous.impulse_high
@@ -1137,7 +1270,7 @@ class SeniorWaveDetector:
         previous.retrace_depth = (high - previous.working_low) / length if length > 0 else None
         previous.fibs = _fib_prices(origin, high)
         last_close = float(h4["close"].iloc[-1])
-        fib_status, _ = _fib_status(last_close, previous.fibs, h4["close"].tail(3).tolist())
+        fib_status, _ = _recovery(h4, previous.fibs, previous.working_low_ts)
         previous.fib_status = fib_status
         previous.last_complete4h_close = last_close
         previous.last_complete4h_bucket = _iso(h4["timestamp"].iloc[-1])
@@ -1152,7 +1285,10 @@ class SeniorWaveDetector:
             parent_w2_low=previous.parent_w2_low,
             w3_1_high=previous.w3_1_high,
         )
-        if projection is None:
+        if projection is None or not (
+            self._same_level(origin, projection[1]) and self._same_level(strict, projection[1])
+            and self._same_level(high, projection[2])
+        ):
             previous.status = "RECOUNT"
             self._clear_derived(previous, fib_status="TARGET ANCHORS INVALID — RECOUNT")
             previous.last_event = "TARGET ANCHORS INVALID — FULL SENIOR RECOUNT REQUIRED"
@@ -1166,6 +1302,8 @@ class SeniorWaveDetector:
             previous.target_impulse_length,
             previous.target_source,
         ) = projection
+        hits = _reached_targets(snapshot, previous.working_low_ts, previous.targets)
+        previous.targets_hit = sorted(set(hits) | (set() if reanchored else set(previous.targets_hit)))
         previous.base_zone, previous.deep_zone = _zones(previous.working_low, high, strict)
         t1_upside = (
             (previous.targets[0] / previous.current_price - 1) * 100
@@ -1182,7 +1320,7 @@ class SeniorWaveDetector:
             previous.wave_type,
             t1_upside,
         )
-        previous.status = _status_from_state(previous.growth_from_low_pct, previous.fib_status)  # type: ignore[assignment]
+        previous.status = "EXTENDED" if previous.targets_hit else _status_from_state(previous.growth_from_low_pct, previous.fib_status)  # type: ignore[assignment]
         if reanchored:
             previous.last_event = "RE-ANCHOR COMPLETE4H"
         elif structure_locked:

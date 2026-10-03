@@ -122,13 +122,14 @@ async def test_manual_lowercase_doge_pol_sol_through_handler_is_state_read_only(
     scanner = ScannerService(cfg, repo, data)
     scanner.detector = SimpleNamespace(detect=lambda *args: None)
     controller = BotController(cfg, repo, scanner)
-    controller.bot = SimpleNamespace(send_message=AsyncMock())
+    controller.bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock(), send_document=AsyncMock())
     await controller.router.message.handlers[-1].callback(message(1, "doge,pol,sol"))
     await asyncio.wait_for(asyncio.gather(*list(controller.background_tasks)), 5)
     assert [call.args[1] for call in data.snapshot.await_args_list] == expected
     assert asdict(await repo.get_settings()) == before
     assert (await repo.tracked_states())[0].to_dict() == old
-    assert controller.bot.send_message.await_count > 0
+    assert controller.bot.send_photo.await_count == 1
+    assert controller.bot.send_document.await_count == 1
 
 
 async def test_walk_executes_checkpoints_without_state_or_timer_mutation(cfg, repo):

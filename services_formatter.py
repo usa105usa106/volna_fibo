@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import html
 import io
+import json
 import re
-import textwrap
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
 from core_models import WaveState
+from core_ranking import ranking_key
 from core_symbols import display_symbol
 
 
@@ -75,10 +76,15 @@ def _zone(z: tuple[float, float] | None) -> str:
 
 
 def _targets(state: WaveState) -> str:
-    if state.targets:
-        return " / ".join(_fmt(x) for x in state.targets[:4])
     if state.status in {"INVALID", "RECOUNT"}:
         return "after recount"
+    if state.status == "DATA_INCOMPLETE":
+        return "—"
+    if state.targets:
+        remaining = [(i, x) for i, x in enumerate(state.targets[:4], 1) if i not in state.targets_hit]
+        if not remaining:
+            return "T1–T4 достигнуты"
+        return " / ".join((f"T{i}: " if state.targets_hit else "") + _fmt(x) for i, x in remaining)
     return "—"
 
 
@@ -127,12 +133,14 @@ def _row_values_flags(state: WaveState, rank: int | None) -> tuple[list[str], li
     base_actionable = not invalid and _inside_zone(state.current_price, state.base_zone)
     deep_actionable = not invalid and _inside_zone(state.current_price, state.deep_zone)
     target_strong = False
-    if not invalid and state.current_price and state.targets:
+    if not invalid and not state.targets_hit and state.current_price and state.targets:
         target_strong = state.targets[0] / state.current_price - 1 >= 0.30
 
     growth = "—" if state.growth_from_low_pct is None else f"{state.growth_from_low_pct:+.1f}%"
     rating = "—" if state.rating is None else f"{state.rating:.1f}"
     wave = state.wave_type if not invalid else f"{state.status} / {state.wave_type}"
+    if not invalid and state.targets_hit:
+        wave += " · late"
     values = [
         str(rank if rank is not None else "—"),
         display_symbol(state.symbol),
@@ -209,8 +217,7 @@ def _row_html(state: WaveState, rank: int | None) -> str:
 def _sorted_crypto(states: list[WaveState]) -> list[WaveState]:
     return sorted(
         (state for state in states if not state.is_control),
-        key=lambda state: state.rating if state.rating is not None else -1.0,
-        reverse=True,
+        key=ranking_key,
     )
 
 
@@ -223,7 +230,7 @@ def _sorted_controls(states: list[WaveState]) -> list[WaveState]:
 
 def table_lines_html(states: list[WaveState], *, ranked: bool = True) -> list[str]:
     ordered = (
-        sorted(states, key=lambda s: s.rating if s.rating is not None else -1.0, reverse=True)
+        sorted(states, key=ranking_key)
         if ranked
         else states
     )
@@ -237,7 +244,7 @@ def _section_chunks(states: list[WaveState], section_title: str, *, ranked: bool
     if not states:
         return []
     ordered = (
-        sorted(states, key=lambda s: s.rating if s.rating is not None else -1.0, reverse=True)
+        sorted(states, key=ranking_key)
         if ranked
         else states
     )
@@ -476,6 +483,8 @@ def _state_technical_lines(state: WaveState, rank: int | None) -> list[str]:
             f"length={_fmt(state.target_impulse_length)}; "
             f"targets={' / '.join(_fmt(x) for x in state.targets) if state.targets else '—'}"
         ),
+        f"  targets_reached={','.join('T' + str(i) for i in state.targets_hit) or 'none'}; detector={state.detector_version or 'legacy'}",
+        f"  structure_evidence: {json.dumps(state.structure_evidence, ensure_ascii=False, sort_keys=True)}",
         f"  last_complete4h={state.last_complete4h_bucket or '—'}; close={_fmt(state.last_complete4h_close)}",
         f"  timestamps: impulse_start={state.impulse_start_ts or '—'}; impulse_high={state.impulse_high_ts or '—'}; working_low={state.working_low_ts or '—'}",
     ]

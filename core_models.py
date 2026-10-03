@@ -47,6 +47,9 @@ class WaveState:
     target_impulse_high: float | None = None
     target_impulse_length: float | None = None
     target_source: str | None = None
+    targets_hit: list[int] = field(default_factory=list)
+    detector_version: str = "0019"
+    structure_evidence: dict[str, Any] = field(default_factory=dict)
     base_zone: tuple[float, float] | None = None
     deep_zone: tuple[float, float] | None = None
     current_price: float | None = None
@@ -72,6 +75,9 @@ class WaveState:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "WaveState":
         data = dict(data)
+        # Older stored counts were produced by the defective anchor selector.
+        # Preserve the tracked symbols, but require a same-symbol recount.
+        data.setdefault("detector_version", "")
         if data.get("base_zone") is not None:
             data["base_zone"] = tuple(data["base_zone"])
         if data.get("deep_zone") is not None:
