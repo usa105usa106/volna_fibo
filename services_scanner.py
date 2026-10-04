@@ -196,6 +196,9 @@ class ScannerService:
                 try:
                     snap = await self.data.snapshot(exchange, symbol, qv_map.get(symbol, 0.0))
                     state = await self._compute(self.detector.detect, snap, rank_map.get(symbol), top_n)
+                    if state and state.status == "DATA_INCOMPLETE":
+                        errors.append(f"{symbol}: DATA_INCOMPLETE · {state.last_event}")
+                        return None
                     async with success_lock:
                         successful_snapshots += 1
                     if state and (state.rating or 0) >= self.cfg.min_rating:
@@ -304,6 +307,9 @@ class ScannerService:
                         if snap.hourly_closed.empty or pd.to_datetime(snap.hourly_closed["timestamp"], utc=True).min() > since:
                             raise DataIntegrityError("tracking history does not cover the last confirmed state")
                     updated = await self._compute(self.detector.track, state, snap, top_n)
+                    if updated.status == "DATA_INCOMPLETE":
+                        errors.append(f"{state.symbol}: DATA_INCOMPLETE · {updated.last_event}")
+                        return updated, None
                     return updated, updated
                 except ControlUnavailable:
                     if state.is_control:
@@ -561,6 +567,11 @@ class ScannerService:
                         d1_hist = d1_all[(d1_all["timestamp"] + pd.Timedelta(days=1)) <= checkpoint].copy()
                         if h1_hist.empty or d1_hist.empty:
                             continue
+                        context_hist = None
+                        if full.daily_context is not None:
+                            context_hist = full.daily_context[
+                                full.daily_context["timestamp"] + pd.Timedelta(days=1) <= checkpoint
+                            ].copy()
                         snap = MarketSnapshot(
                             symbol=symbol,
                             exchange=exchange,
@@ -569,6 +580,8 @@ class ScannerService:
                             live_low=float(h1_hist["low"].iloc[-1]),
                             hourly_closed=h1_hist.tail(self.cfg.lookback_1h_days * 24 + 48).copy(),
                             daily_closed=d1_hist.tail(self.cfg.lookback_1d_days + 5).copy(),
+                            daily_context=context_hist,
+                            history_evidence=dict(full.history_evidence),
                         )
                         rank = rank_map.get(symbol, diagnostic_top_n + 1)
                         state = self.detector.detect(snap, rank, diagnostic_top_n)
@@ -778,4 +791,3 @@ class ScannerService:
                 assets=[asset_reports[base] for base in WALK_MAJOR_BASES],
                 wave_buckets={k: tuple(v) for k, v in wave_buckets.items()},
             )
-

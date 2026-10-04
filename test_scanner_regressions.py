@@ -78,6 +78,36 @@ async def test_tracking_bad_data_keeps_confirmed_state_bytes(cfg, repo):
     assert (await repo.tracked_states())[0].to_dict() == original.to_dict()
 
 
+async def test_detector_incomplete_senior_history_is_not_a_successful_search(cfg, repo):
+    await repo.replace_active_session("binance_spot", 100, [state()])
+    scanner = ScannerService(cfg, repo, fake_data())
+    def incomplete(snapshot, *args):
+        diagnostic = state(snapshot.symbol)
+        diagnostic.status = "DATA_INCOMPLETE"
+        diagnostic.rating = 0.
+        diagnostic.targets = []
+        return diagnostic
+    scanner.detector = SimpleNamespace(detect=incomplete)
+    with pytest.raises(SearchIncompleteError, match="0/100"):
+        await scanner.search()
+    assert [s.symbol for s in await repo.tracked_states()] == ["OLDUSDT"]
+
+
+async def test_detector_incomplete_senior_history_does_not_overwrite_track(cfg, repo):
+    original = state()
+    original.last_complete4h_bucket = None
+    await repo.replace_active_session("binance_spot", 100, [original])
+    scanner = ScannerService(cfg, repo, fake_data())
+    def incomplete(previous, *args):
+        previous.status = "DATA_INCOMPLETE"
+        previous.targets = []
+        return previous
+    scanner.detector = SimpleNamespace(track=incomplete)
+    result = await scanner.track()
+    assert result.states[0].status == "DATA_INCOMPLETE"
+    assert (await repo.tracked_states())[0].to_dict() == original.to_dict()
+
+
 async def test_tracking_requires_coverage_since_previous_confirmed_bucket(cfg, repo):
     original = state()
     await repo.replace_active_session("binance_spot", 100, [original])

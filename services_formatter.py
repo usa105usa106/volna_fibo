@@ -80,6 +80,8 @@ def _targets(state: WaveState) -> str:
         return "after recount"
     if state.status == "DATA_INCOMPLETE":
         return "—"
+    if state.wave_type == "W4" or state.status == "PHASE_UNCERTAIN":
+        return "после проверки стадии"
     if state.targets:
         remaining = [(i, x) for i, x in enumerate(state.targets[:4], 1) if i not in state.targets_hit]
         if not remaining:
@@ -121,7 +123,7 @@ def _row_values_flags(state: WaveState, rank: int | None) -> tuple[list[str], li
     v0018 deliberately uses sparse emphasis: bold/green means a genuinely favorable
     property, not merely a valid field. This keeps the image readable at a glance.
     """
-    invalid = state.status in {"INVALID", "RECOUNT", "NO_SETUP", "DATA_INCOMPLETE"}
+    invalid = state.status in {"INVALID", "RECOUNT", "NO_SETUP", "DATA_INCOMPLETE", "PHASE_UNCERTAIN"}
     rating_strong = not invalid and state.rating is not None and state.rating >= 8.5
     very_fresh = (
         not invalid
@@ -139,10 +141,16 @@ def _row_values_flags(state: WaveState, rank: int | None) -> tuple[list[str], li
     growth = "—" if state.growth_from_low_pct is None else f"{state.growth_from_low_pct:+.1f}%"
     rating = "—" if state.rating is None else f"{state.rating:.1f}"
     wave = state.wave_type if not invalid else f"{state.status} / {state.wave_type}"
+    if state.wave_type == "W4" and state.status == "PHASE_UNCERTAIN":
+        after = state.structure_evidence.get("mature_impulse", {}).get("next_high_accepted_at")
+        wave = "после W4?" if after else "W4? · кандидат"
+        rating = "—"
     if not invalid and state.structure_evidence.get("projection_accepted_at"):
         wave = f"после {state.wave_type}"
     if not invalid and state.targets_hit:
         wave += " · late"
+    if not invalid and state.structure_evidence.get("ancestry_incomplete"):
+        wave = "степень? · нет истории TON"
     values = [
         str(rank if rank is not None else "—"),
         display_symbol(state.symbol),
@@ -432,7 +440,7 @@ def render_table_png(
         y += header_height
 
         for row_index, (state, values, flags, wraps, row_height) in enumerate(rows):
-            invalid = state.status in {"INVALID", "RECOUNT", "DATA_INCOMPLETE"}
+            invalid = state.status in {"INVALID", "RECOUNT", "DATA_INCOMPLETE", "PHASE_UNCERTAIN"}
             if invalid:
                 base_fill = (255, 239, 239)
             elif controls_section:

@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 
-WaveType = Literal["W2", "W3-(2)", "CONTROL", "NONE"]
+WaveType = Literal["W2", "W3-(2)", "W4", "CONTROL", "NONE"]
 WaveStatus = Literal[
     "FORMING",
     "DEEP",
@@ -16,6 +16,7 @@ WaveStatus = Literal[
     "RECOUNT",
     "NO_SETUP",
     "DATA_INCOMPLETE",
+    "PHASE_UNCERTAIN",
 ]
 
 
@@ -48,7 +49,7 @@ class WaveState:
     target_impulse_length: float | None = None
     target_source: str | None = None
     targets_hit: list[int] = field(default_factory=list)
-    detector_version: str = "0020"
+    detector_version: str = "0022"
     structure_evidence: dict[str, Any] = field(default_factory=dict)
     base_zone: tuple[float, float] | None = None
     deep_zone: tuple[float, float] | None = None
@@ -94,6 +95,10 @@ class MarketSnapshot:
     live_low: float | None
     hourly_closed: Any
     daily_closed: Any
+    # Validated daily context across an explicitly documented ticker transition.
+    # It is ancestry evidence only; active anchors still come from current H4.
+    daily_context: Any = None
+    history_evidence: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

@@ -14,6 +14,7 @@ import pandas as pd
 from core_symbols import CONTROL_BASES, excluded_from_crypto_top
 from data_http import request_with_retry
 from data_integrity import DataIntegrityError, IntegrityPolicy, validate_candles
+from data_lineage import restrict_current_history
 from services_tasks import gather_owned
 
 
@@ -167,6 +168,9 @@ class BinanceSpotClient(ExchangeClient):
         if (pd.to_numeric(raw["close_time"], errors="coerce") != pd.to_numeric(raw["open_time"], errors="coerce") + step - 1).any():
             raise DataIntegrityError("Binance: invalid candle close_time")
         raw["timestamp"] = pd.to_datetime(raw["open_time"], unit="ms", utc=True)
+        raw = restrict_current_history(raw, self.name, symbol, timeframe)
+        if raw.empty:
+            return pd.DataFrame(), None, None
         return _candle_result(raw[["timestamp", "open", "high", "low", "close", "volume"]], timeframe, end, is_control=symbol in {"XAUUSDT", "USOILUSDT"})
 
 
@@ -294,4 +298,7 @@ class MexcFuturesClient(ExchangeClient):
         if not frames:
             return pd.DataFrame(), None, None
         raw = pd.concat(frames, ignore_index=True)
+        raw = restrict_current_history(raw, self.name, symbol, timeframe)
+        if raw.empty:
+            return pd.DataFrame(), None, None
         return _candle_result(raw, timeframe, end, is_control=symbol in {"XAU_USDT", "USOIL_USDT"})

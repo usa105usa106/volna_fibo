@@ -11,15 +11,16 @@ from core_models import MarketSnapshot
 from data_exchanges import BinanceSpotClient, ControlUnavailable, MexcFuturesClient
 from data_integrity import IntegrityPolicy, validate_candles
 from data_integrity import DataIntegrityError
+from data_lineage import load_daily_context, transition_for
 from services_tasks import gather_owned
 
 
 class MarketDataService:
     """Fresh exchange-only market-data loader.
 
-    No parquet/database candle cache exists. Search and manual analysis always download
-    their complete configured history from the selected exchange. Tracking persists only
-    senior-wave state, never OHLC history.
+    No parquet/database candle cache exists. Current candles and documented ticker
+    predecessor context are downloaded from the selected exchange itself. Tracking
+    persists senior-wave state and provenance, never OHLC history.
     """
 
     def __init__(self, settings: Settings):
@@ -139,6 +140,10 @@ class MarketDataService:
         if live_price is not None and live_low is not None and live_low > live_price:
             raise DataIntegrityError("live low exceeds live price")
 
+        context, history = None, {}
+        if transition_for(exchange, symbol) is not None:
+            context, history = await load_daily_context(self.clients[exchange], symbol, d1, d1_start, now)
+
         return MarketSnapshot(
             symbol=symbol,
             exchange=exchange,
@@ -147,6 +152,8 @@ class MarketDataService:
             live_low=live_low,
             hourly_closed=h1,
             daily_closed=d1,
+            daily_context=context,
+            history_evidence=history,
         )
 
 

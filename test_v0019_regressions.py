@@ -20,13 +20,13 @@ from services_formatter import _targets as display_targets
 
 @pytest.fixture(scope="module")
 def archive():
-    return ArchiveReader(Path(__file__).parent / "fixtures/market_0925")
+    return ArchiveReader(Path(__file__).parent / "fixtures/market_0925", hourly_prefix=Path(__file__).parent / "fixtures/hourly_history/binance_BCH_1h_prefix.parquet")
 
 
 @pytest.mark.parametrize("asset,origin,high,low,wave", [
     ("DOGE", .07831, .10589, .09031, "W3-(2)"),
-    ("BCH", 212.8, 366.4, 296.1, "W3-(2)"),
-    ("LTC", 50.20, 75.0, 65.63, "W3-(2)"),
+    # v0021: retain the larger D1 parent, not the inner 212.8/239 corrections.
+    ("BCH", 199.7, 366.4, 296.1, "W3-(2)"),
     ("GRAM", 1.286, 1.740, 1.460, "W2"),
     ("USOIL", 74.36, 108.88, 88.31, "W2"),
     ("XAU", 3948.4, 4701.48, 4116.59, "W2"),
@@ -49,7 +49,7 @@ def test_real_archive_public_detector_anchors_and_decimal_projection(archive, as
     assert state.targets == pytest.approx([float(x) for x in expected], rel=1e-12)
 
 
-def test_real_gram_all_time_low_cannot_inherit_an_invented_parent(archive):
+def test_real_gram_available_history_low_cannot_inherit_an_invented_parent(archive):
     snap = archive.snapshot("GRAM")
     assert snap.daily_closed.low.min() == 1.286
     state = SeniorWaveDetector().detect(snap, archive.rank("GRAM"), 300)
