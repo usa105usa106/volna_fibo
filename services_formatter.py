@@ -32,7 +32,13 @@ IMAGE_HEADERS = [
     "На вынос",
     "Цели",
 ]
-CONTROL_ORDER = {"XAU": 0, "USOIL": 1}
+CONTROL_ORDER = {"XAU": 0, "XAG": 1, "USOIL": 2}
+
+
+def _controls_title(states: list[WaveState]) -> str:
+    # XAG is manual-only; keep the existing Search section when it was not asked for.
+    names = "XAU / XAG / USOIL" if any(display_symbol(s.symbol) == "XAG" for s in states) else "XAU / USOIL"
+    return names + " — ДОПОЛНИТЕЛЬНО"
 
 # 2560px keeps eleven true vertical columns readable when the Telegram image is opened.
 IMAGE_COLUMN_WIDTHS = [75, 175, 145, 210, 205, 210, 330, 180, 275, 275, 470]
@@ -157,6 +163,10 @@ def _row_values_flags(state: WaveState, rank: int | None) -> tuple[list[str], li
         wave = f"{state.wave_type} · сценарий"
     elif not invalid and state.structure_evidence.get("daily_parent", {}).get("context_market"):
         wave += " · спот-контекст"
+    elif not invalid and state.structure_evidence.get("history", {}).get("status") == "restored":
+        history = state.structure_evidence["history"]
+        if history.get("predecessor") and history.get("current"):
+            wave += f" · {display_symbol(history['predecessor'])}→{display_symbol(history['current'])}"
     low = _fmt(state.working_low)
     if not invalid and state.working_low is not None and state.retrace_depth is not None and math.isfinite(state.retrace_depth):
         low += f" · {state.retrace_depth * 100:.2f}%"
@@ -284,7 +294,7 @@ def _section_chunks(states: list[WaveState], section_title: str, *, ranked: bool
     return chunks
 
 
-def telegram_table_messages(states: list[WaveState], title: str, max_chars: int = 3500, *, crypto_label: str = "CRYPTO", controls_label: str = "XAU / USOIL — ДОПОЛНИТЕЛЬНО, ВНЕ РЕЙТИНГА") -> list[str]:
+def telegram_table_messages(states: list[WaveState], title: str, max_chars: int = 3500, *, crypto_label: str = "CRYPTO", controls_label: str | None = None) -> list[str]:
     """Text fallback used only if PNG delivery/rendering fails."""
     crypto = _sorted_crypto(states)
     controls = _sorted_controls(states)
@@ -294,6 +304,8 @@ def telegram_table_messages(states: list[WaveState], title: str, max_chars: int 
         messages.extend(_section_chunks(crypto, crypto_label, ranked=True, max_chars=max_chars, report_title=report_title))
         report_title = None
     if controls:
+        if controls_label is None:
+            controls_label = _controls_title(controls) + ", ВНЕ РЕЙТИНГА"
         messages.extend(_section_chunks(controls, controls_label, ranked=False, max_chars=max_chars, report_title=report_title))
         report_title = None
     if not messages:
@@ -473,7 +485,7 @@ def render_table_png(
     if control_rows:
         if crypto_rows:
             y += 24
-        draw_section("XAU / USOIL — ДОПОЛНИТЕЛЬНО", control_rows, controls_section=True)
+        draw_section(_controls_title(controls), control_rows, controls_section=True)
 
     if not crypto_rows and not control_rows:
         draw.text((50, y + 40), "Нет данных для таблицы.", font=section_font, fill=(31, 41, 55))
@@ -490,6 +502,7 @@ def _state_technical_lines(state: WaveState, rank: int | None) -> list[str]:
     fibs = ", ".join(f"{key}={_fmt(value)}" for key, value in state.fibs.items()) or "—"
     return [
         " | ".join(values),
+        f"  market={state.exchange}; instrument={state.symbol}",
         f"  status={state.status}; wave={state.wave_type}; event={state.last_event or '—'}",
         f"  origin={_fmt(state.origin)}; impulse_high={_fmt(state.impulse_high)}; working_low={_fmt(state.working_low)}; strict_origin={_fmt(state.strict_origin)}",
         f"  retrace={'—' if state.retrace_depth is None else f'{state.retrace_depth * 100:.2f}%'}; strict_distance={'—' if state.strict_distance_pct is None else f'{state.strict_distance_pct:.2f}%'}; growth_from_low={'—' if state.growth_from_low_pct is None else f'{state.growth_from_low_pct:+.2f}%'}",
@@ -525,7 +538,7 @@ def technical_report_text(
         lines.extend(_state_technical_lines(state, index))
         lines.append("-")
     if controls:
-        lines.extend(["", "XAU / USOIL — ДОПОЛНИТЕЛЬНО", "=" * 120])
+        lines.extend(["", _controls_title(controls), "=" * 120])
         for state in controls:
             lines.extend(_state_technical_lines(state, None))
             lines.append("-")

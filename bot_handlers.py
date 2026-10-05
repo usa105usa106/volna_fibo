@@ -472,6 +472,8 @@ class BotController:
 
     def _report_titles(self, result: RunResult) -> tuple[str, str, str]:
         exchange_title = EXCHANGE_LABELS.get(result.exchange, result.exchange)
+        if result.exchange == "binance_spot" and any(s.is_control for s in result.states):
+            exchange_title = "Binance Spot · металлы: Binance Futures"
         if result.mode == "search":
             return "ПОИСК W2 / W3-(2)", f"{exchange_title} · Top-{result.top_n}", "TOP-10 CRYPTO"
         if result.mode == "track":

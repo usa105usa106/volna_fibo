@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import pandas as pd
 
-from core_symbols import CONTROL_BASES, excluded_from_crypto_top
+from core_symbols import CONTROL_BASES, MEXC_CONTROL_SYMBOLS, excluded_from_crypto_top
 from data_http import request_with_retry
 from data_integrity import DataIntegrityError, IntegrityPolicy, validate_candles
 from data_lineage import restrict_current_history
@@ -68,7 +68,7 @@ class ExchangeClient(ABC):
 
     @abstractmethod
     async def control_symbols(self) -> dict[str, str]:
-        """Map canonical XAU/USOIL names to instruments on this exact selected exchange."""
+        """Map canonical commodity names to instruments on this exact market."""
         raise NotImplementedError
 
     async def control_candles(self, canonical: str, timeframe: str, start: datetime, end: datetime):
@@ -82,9 +82,10 @@ class ExchangeClient(ABC):
 class BinanceSpotClient(ExchangeClient):
     name = "binance_spot"
     base_url = "https://api.binance.com"
+    api_prefix = "/api/v3"
 
     async def _exchange_info(self) -> dict[str, Any]:
-        r = await self._get(f"{self.base_url}/api/v3/exchangeInfo")
+        r = await self._get(f"{self.base_url}{self.api_prefix}/exchangeInfo")
         r.raise_for_status()
         return r.json()
 
@@ -142,7 +143,7 @@ class BinanceSpotClient(ExchangeClient):
         cursor = start_ms
         while cursor < end_ms:
             r = await self._get(
-                f"{self.base_url}/api/v3/klines",
+                f"{self.base_url}{self.api_prefix}/klines",
                 params={"symbol": symbol, "interval": interval, "startTime": cursor, "endTime": end_ms, "limit": 1000},
             )
             r.raise_for_status()
@@ -171,7 +172,37 @@ class BinanceSpotClient(ExchangeClient):
         raw = restrict_current_history(raw, self.name, symbol, timeframe)
         if raw.empty:
             return pd.DataFrame(), None, None
-        return _candle_result(raw[["timestamp", "open", "high", "low", "close", "volume"]], timeframe, end, is_control=symbol in {"XAUUSDT", "USOILUSDT"})
+        return _candle_result(raw[["timestamp", "open", "high", "low", "close", "volume"]], timeframe, end, is_control=symbol in {f"{base}USDT" for base in CONTROL_BASES})
+
+
+class BinanceFuturesClient(BinanceSpotClient):
+    """USD-M commodity candles; the existing crypto universe stays on Spot.
+
+    Trade kline fields and pagination are the same twelve-field millisecond
+    format as Spot. Do not use mark/index prices or silently substitute XAUT.
+    """
+
+    name = "binance_futures"
+    base_url = "https://fapi.binance.com"
+    api_prefix = "/fapi/v1"
+
+    async def top_symbols(self, n: int) -> list[tuple[str, float]]:
+        raise NotImplementedError("Binance Futures is used only for commodity controls")
+
+    async def control_symbols(self) -> dict[str, str]:
+        info = await self._exchange_info()
+        if not isinstance(info, dict) or not isinstance(info.get("symbols"), list):
+            raise ExchangeAPIError("Binance Futures: malformed exchangeInfo")
+        found: dict[str, str] = {}
+        for row in info["symbols"]:
+            base = row.get("baseAsset")
+            if (base in CONTROL_BASES and row.get("symbol") == f"{base}USDT"
+                    and row.get("status") == "TRADING"
+                    and row.get("contractType") == "PERPETUAL"
+                    and row.get("quoteAsset") == "USDT"
+                    and row.get("marginAsset") == "USDT"):
+                found[base] = row["symbol"]
+        return found
 
 
 class MexcFuturesClient(ExchangeClient):
@@ -257,14 +288,14 @@ class MexcFuturesClient(ExchangeClient):
         return rows[:n]
 
     async def control_symbols(self) -> dict[str, str]:
-        # MEXC currently exposes these as XAU_USDT and USOIL_USDT. Resolve from the
-        # exchange's own ticker list each run; absence means "skip", never fallback.
+        # Resolve documented aliases from the actual list each run. Missing
+        # contracts stay unavailable; another asset/exchange is never substituted.
         available = {str(t.get("symbol", "")) for t in await self._ticker_data()}
         found: dict[str, str] = {}
-        if "XAU_USDT" in available:
-            found["XAU"] = "XAU_USDT"
-        if "USOIL_USDT" in available:
-            found["USOIL"] = "USOIL_USDT"
+        for canonical, candidates in MEXC_CONTROL_SYMBOLS.items():
+            remote = next((item for item in candidates if item in available), None)
+            if remote is not None:
+                found[canonical] = remote
         return found
 
     async def candles(self, symbol: str, timeframe: str, start: datetime, end: datetime) -> tuple[pd.DataFrame, float | None, float | None]:
@@ -301,7 +332,9 @@ class MexcFuturesClient(ExchangeClient):
         raw = restrict_current_history(raw, self.name, symbol, timeframe)
         if raw.empty:
             return pd.DataFrame(), None, None
-        return _candle_result(raw, timeframe, end, is_control=symbol in {"XAU_USDT", "USOIL_USDT"})
+        return _candle_result(raw, timeframe, end, is_control=symbol in {
+            remote for candidates in MEXC_CONTROL_SYMBOLS.values() for remote in candidates
+        })
 
 
 class MexcSpotHistoryClient(ExchangeClient):

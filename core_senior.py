@@ -9,6 +9,7 @@ from typing import Iterable
 import pandas as pd
 
 from core_models import MarketSnapshot, WaveState
+from core_symbols import CONTROL_BASES
 from data_integrity import DataIntegrityError
 
 
@@ -841,7 +842,7 @@ class SeniorWaveDetector:
                     h4=h4,
                     liquidity_rank=liquidity_rank,
                     top_n=top_n,
-                    is_control=snapshot.symbol in {"XAU", "USOIL"},
+                    is_control=snapshot.symbol in CONTROL_BASES,
                 )
                 if state is not None:
                     state.structure_evidence.update({
@@ -889,7 +890,7 @@ class SeniorWaveDetector:
                 h4=h4,
                 liquidity_rank=liquidity_rank,
                 top_n=top_n,
-                is_control=snapshot.symbol in {"XAU", "USOIL"},
+                is_control=snapshot.symbol in CONTROL_BASES,
             )
             if state is not None:
                 state.structure_evidence.update({"route": "DAILY_W1_COMPLETE4H_W2", "daily_high_context_only": False})

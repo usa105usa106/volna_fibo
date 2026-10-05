@@ -12,13 +12,21 @@ STABLE_BASES = frozenset({
     "USDQ", "USDF", "AUSD",
 })
 
-CONTROL_BASES = frozenset({"XAU", "USOIL"})
+CONTROL_BASES = frozenset({"XAU", "XAG", "USOIL"})
+
+# Exchange symbol aliases, not substitutions with tokenized metals. MEXC's
+# displayed SILVER(XAG) perpetual uses SILVER_USDT in its public contract API.
+MEXC_CONTROL_SYMBOLS = {
+    "XAU": ("XAU_USDT",),
+    "XAG": ("SILVER_USDT", "XAG_USDT"),
+    "USOIL": ("USOIL_USDT",),
+}
 
 WALK_MAJOR_BASES = ("BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "LINK", "LTC", "BCH")
 
 # Commodity duplicates must never consume a crypto Top-N slot because XAU/USOIL
 # are analyzed separately as permanent exchange controls.
-COMMODITY_DUPLICATE_BASES = frozenset({"XAUT", "UKOIL"})
+COMMODITY_DUPLICATE_BASES = frozenset({"XAUT", "UKOIL", "SILVER"})
 
 # Exact leveraged-token bases only. Never infer leverage from a suffix alone:
 # JUP is a normal token and must not be rejected merely because it ends in "UP".
@@ -48,8 +56,6 @@ def excluded_from_crypto_top(base: str) -> bool:
 
 def normalize_symbol(exchange: str, raw: str) -> str:
     token = raw.strip().upper().replace(" ", "")
-    if token in {"XAU", "USOIL"}:
-        return token
     token = token.replace("/", "").replace("-", "").replace("_", "")
     if token.endswith("USDT"):
         base = token[:-4]
@@ -57,11 +63,15 @@ def normalize_symbol(exchange: str, raw: str) -> str:
         base = token
     if not base or not re.fullmatch(r"[A-Z0-9]{1,24}", base):
         raise ValueError(f"Некорректный тикер: {raw}")
+    if base in CONTROL_BASES:
+        return base
+    if exchange == "mexc_futures" and base == "SILVER":
+        return "XAG"
     return f"{base}USDT" if exchange == "binance_spot" else f"{base}_USDT"
 
 
 def display_symbol(symbol: str) -> str:
-    if symbol in {"XAU", "USOIL"}:
+    if symbol in CONTROL_BASES:
         return symbol
     if symbol.endswith("_USDT"):
         return symbol[:-5]

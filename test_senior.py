@@ -663,7 +663,7 @@ def test_no_yahoo_commodity_proxy_remains_in_runtime_source():
 
 def test_version_0018_is_default():
     cfg = Settings(BOT_TOKEN="test")
-    assert cfg.bot_version == "0023"
+    assert cfg.bot_version == "0024"
     assert cfg.default_top_n == 100
 
 

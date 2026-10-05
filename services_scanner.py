@@ -13,7 +13,7 @@ from config import Settings
 from core_models import MarketSnapshot, WaveState
 from core_ranking import select_top_crypto
 from core_senior import SeniorWaveDetector, control_no_setup, data_incomplete_state, no_setup_state
-from core_symbols import WALK_MAJOR_BASES, display_symbol, excluded_from_crypto_top, normalize_symbol
+from core_symbols import CONTROL_BASES, WALK_MAJOR_BASES, display_symbol, excluded_from_crypto_top, normalize_symbol
 from data_collector import MarketDataService
 from data_exchanges import ControlUnavailable
 from data_integrity import DataIntegrityError
@@ -245,7 +245,7 @@ class ScannerService:
                         state.is_control = True
                         controls.append(state)
                     else:
-                        controls.append(control_no_setup(symbol, exchange, snap.live_price))
+                        controls.append(control_no_setup(symbol, snap.exchange, snap.live_price))
                 except ControlUnavailable:
                     skipped_controls.append(symbol)
                 except DataIntegrityError as exc:
@@ -392,7 +392,7 @@ class ScannerService:
             qv_map = dict(universe)
 
             async def one(symbol: str) -> WaveState:
-                is_control = symbol in {"XAU", "USOIL"}
+                is_control = symbol in CONTROL_BASES
                 try:
                     snap = await self.data.snapshot(exchange, symbol, qv_map.get(symbol, 0.0))
                     rank = None if is_control else rank_map.get(symbol, top_n + 1)
@@ -400,7 +400,7 @@ class ScannerService:
                     if state:
                         state.is_control = is_control
                         return state
-                    return no_setup_state(symbol, exchange, snap.live_price, is_control=is_control)
+                    return no_setup_state(symbol, snap.exchange, snap.live_price, is_control=is_control)
                 except ControlUnavailable:
                     errors.append(f"{symbol}: UNAVAILABLE_ON_EXCHANGE")
                     return data_incomplete_state(symbol, exchange, None, is_control=is_control, event="UNAVAILABLE ON SELECTED EXCHANGE")

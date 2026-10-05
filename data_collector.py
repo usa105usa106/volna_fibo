@@ -8,7 +8,8 @@ import httpx
 
 from config import Settings
 from core_models import MarketSnapshot
-from data_exchanges import BinanceSpotClient, ControlUnavailable, MexcFuturesClient, MexcSpotHistoryClient
+from core_symbols import CONTROL_BASES
+from data_exchanges import BinanceFuturesClient, BinanceSpotClient, ControlUnavailable, MexcFuturesClient, MexcSpotHistoryClient
 from data_integrity import IntegrityPolicy, validate_candles
 from data_integrity import DataIntegrityError
 from data_lineage import load_daily_context, transition_for
@@ -38,6 +39,7 @@ class MarketDataService:
             "binance_spot": BinanceSpotClient(self.http, **client_kwargs),
             "mexc_futures": MexcFuturesClient(self.http, **client_kwargs),
         }
+        self.binance_futures = BinanceFuturesClient(self.http, **client_kwargs)
         self.spot_history_clients = (
             MexcSpotHistoryClient(self.http, **client_kwargs), self.clients["binance_spot"],
         )
@@ -56,13 +58,16 @@ class MarketDataService:
         return await self.clients[exchange].top_symbols(top_n)
 
     async def available_controls(self, exchange: str) -> dict[str, str]:
-        """Return XAU/USOIL instruments available on the exact selected exchange."""
-        return await self.clients[exchange].control_symbols()
+        """Same exchange; Binance commodities use USD-M Futures, crypto Spot."""
+        return await self._control_client(exchange).control_symbols()
+
+    def _control_client(self, exchange: str):
+        return self.binance_futures if exchange == "binance_spot" else self.clients[exchange]
 
     async def _candles(self, exchange: str, symbol: str, timeframe: str, start: datetime, end: datetime):
         client = self.clients[exchange]
-        if symbol in {"XAU", "USOIL"}:
-            return await client.control_candles(symbol, timeframe, start, end)
+        if symbol in CONTROL_BASES:
+            return await self._control_client(exchange).control_candles(symbol, timeframe, start, end)
         return await client.candles(symbol, timeframe, start, end)
 
     async def snapshot(self, exchange: str, symbol: str, quote_volume: float = 0.0) -> MarketSnapshot:
@@ -112,16 +117,18 @@ class MarketDataService:
         d1_start: datetime,
         check_freshness: bool,
     ) -> MarketSnapshot:
-        is_control = symbol in {"XAU", "USOIL"}
+        is_control = symbol in CONTROL_BASES
+        source_exchange = exchange
 
         # Resolve a commodity once per snapshot from the selected exchange itself.
         # There is deliberately no cross-exchange or Yahoo fallback.
         if is_control:
-            client = self.clients[exchange]
+            client = self._control_client(exchange)
             mapping = await client.control_symbols()
             remote = mapping.get(symbol)
             if remote is None:
                 raise ControlUnavailable(f"{symbol} unavailable on {exchange}")
+            source_exchange = client.name
             h1_task = client.candles(remote, "1h", h1_start, now)
             d1_task = client.candles(remote, "1d", d1_start, now)
         else:
@@ -151,7 +158,7 @@ class MarketDataService:
 
         return MarketSnapshot(
             symbol=symbol,
-            exchange=exchange,
+            exchange=source_exchange,
             quote_volume=quote_volume,
             live_price=live_price,
             live_low=live_low,
