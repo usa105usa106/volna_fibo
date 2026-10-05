@@ -1,4 +1,6 @@
-"""Phase guard: real ZEC/BCH candles, chronology, no symbol/price exceptions.
+"""Phase regressions updated for authorized v0023 W4/W5 continuation.
+
+Real ZEC/BCH candles, chronology, no symbol/price exceptions.
 
 These are detector contract tests, not evidence that Elliott degree is unique or
 that any projected price will be reached. Live exchange access is not required.
@@ -32,13 +34,14 @@ def archive():
 def test_real_zec_completed_subdivision_blocks_false_fresh_w3_2(archive):
     snap = archive.snapshot("ZEC")
     state = SeniorWaveDetector().detect(snap, archive.rank("ZEC"), 300)
-    assert (state.wave_type, state.status) == ("W4", "PHASE_UNCERTAIN")
+    assert (state.wave_type, state.status) == ("W4", "CONFIRMED")
     assert (state.origin, state.impulse_high, state.working_low) == (368.03, 1698., 1271.09)
     assert state.strict_origin == 544.28
-    assert state.targets == [] and state.target_origin is None
-    assert state.target_impulse_high is None and state.target_impulse_length is None
-    assert state.fibs == {} and state.base_zone is None and state.deep_zone is None
-    assert state.rating == 0 and state.w3_1_high is None
+    assert state.targets == pytest.approx([1452.88088, 1565.25, 1747.04088])
+    assert state.target_origin == 250.12 and state.target_impulse_high == 544.28
+    assert state.target_impulse_length == pytest.approx(294.16)
+    assert state.fibs and state.base_zone and state.deep_zone
+    assert state.rating > 0 and state.w3_1_high is None
     proof = state.structure_evidence["mature_impulse"]
     assert proof["certainty"] == "AMBIGUOUS_DEGREE"
     assert [p["price"] for p in proof["subwaves"]] == [368.03, 589.18, 451.75, 888., 751.53, 1698.]
@@ -56,7 +59,7 @@ def test_zec_phase_is_independent_of_symbol_price_scale_and_date(archive, scale,
         frame["timestamp"] += pd.Timedelta(days=shift)
     snap.live_price *= scale
     state = SeniorWaveDetector().detect(snap, 20, 300)
-    assert state.wave_type == "W4" and not state.targets
+    assert state.wave_type == "W4" and state.targets == pytest.approx([x * scale for x in [1452.88088, 1565.25, 1747.04088]])
     assert state.working_low == pytest.approx(1271.09 * scale, rel=1e-12, abs=0)
 
 
@@ -65,7 +68,7 @@ def test_zec_phase_is_independent_of_symbol_price_scale_and_date(archive, scale,
     ("DOGE", "W3-(2)", [.11789, .13493444, .16251444, .20713888]),
     ("GRAM", "W3-(2)", [1.914, 2.194572, 2.648572, 3.383144]),
     ("XAU", "W2", [4869.67, 5335.07344, 6088.15344, 7306.63688]),
-    ("USOIL", "W2", [122.83, 144.16336, 178.68336, 234.53672]),
+    ("USOIL", "W3-(2)", [122.83, 144.16336, 178.68336, 234.53672]),
 ])
 def test_existing_senior_targets_are_not_removed_just_because_price_rose(archive, symbol, expected_wave, expected_targets):
     state = SeniorWaveDetector().detect(archive.snapshot(symbol), archive.rank(symbol), 300)
@@ -78,7 +81,7 @@ def test_short_zec_history_does_not_invent_subdivision_or_publish_shorter_target
     state = SeniorWaveDetector().detect(short.snapshot("ZEC"), 5, 300)
     assert state.status == "DATA_INCOMPLETE" and state.targets == []
     restored = SeniorWaveDetector().track(state, archive.snapshot("ZEC"), 300)
-    assert restored.wave_type == "W4" and restored.targets == []
+    assert restored.wave_type == "W4" and restored.targets == pytest.approx([1452.88088, 1565.25, 1747.04088])
 
 
 def test_stored_v0021_zec_is_recounted_on_first_track(archive):
@@ -91,8 +94,8 @@ def test_stored_v0021_zec_is_recounted_on_first_track(archive):
     state.rating = 9.2
     state = WaveState.from_dict(json.loads(json.dumps(state.to_dict())))
     result = SeniorWaveDetector().track(state, snap, 300)
-    assert result.wave_type == "W4" and result.targets == []
-    assert result.detector_version == "0022"
+    assert result.wave_type == "W4" and result.targets == pytest.approx([1452.88088, 1565.25, 1747.04088])
+    assert result.detector_version == "0023"
     assert "SAME-SYMBOL RECOUNT" in result.last_event
 
 
@@ -103,9 +106,9 @@ def test_track_retains_mature_phase_when_rolling_window_loses_all_parent_anchors
     snap.hourly_closed = snap.hourly_closed.tail(300)
     snap.daily_closed = snap.daily_closed.tail(45)
     result = SeniorWaveDetector().track(saved, snap, 300)
-    assert result.wave_type == "W4" and result.status == "PHASE_UNCERTAIN"
+    assert result.wave_type == "W4" and result.status == "CONFIRMED"
     assert result.structure_evidence["mature_impulse"] == state.structure_evidence["mature_impulse"]
-    assert not result.targets and result.rating == 0
+    assert result.targets == state.targets and result.rating > 0
 
 
 def test_track_w4_overlap_invalidates_immediately_even_without_new_c4h(archive):
@@ -139,7 +142,7 @@ def test_phase_track_uses_closed_h1_only_for_overlap_not_for_reanchoring(archive
     assert result.working_low == 1271.09
     complete = append_hours(partial, [1280., 1290.])
     result = SeniorWaveDetector().track(result, complete, 300)
-    assert result.working_low == 1260. and not result.targets
+    assert result.working_low == 1260. and result.targets == pytest.approx([1441.79088, 1554.16, 1735.95088])
     assert result.working_low_ts.startswith("2026-10-03T16:")
 
 
@@ -148,10 +151,10 @@ def test_new_record_high_does_not_recycle_w4_into_w2(archive):
     state = SeniorWaveDetector().detect(snap, 5, 300)
     later = append_hours(snap, [1701., 1702., 1703.])
     result = SeniorWaveDetector().track(state, later, 300)
-    assert result.wave_type == "W4" and result.status == "PHASE_UNCERTAIN"
-    assert result.structure_evidence["mature_impulse"]["phase"] == "AFTER_W4_CANDIDATE"
-    assert _row_values_flags(result, 1)[0][4] == "после W4?"
-    assert result.targets == []
+    assert result.wave_type == "W5" and result.status == "EXTENDED"
+    assert result.structure_evidence["mature_impulse"]["phase"] == "W5_SCENARIO"
+    assert _row_values_flags(result, 1)[0][4] == "W5 · сценарий"
+    assert result.targets == pytest.approx([1452.88088, 1565.25, 1747.04088])
 
 
 def test_mature_phase_track_rejects_backward_history(archive):
@@ -174,7 +177,7 @@ def test_old_nested_track_advances_to_mature_phase_in_the_same_cycle(archive):
         h4=complete4h(old.hourly_closed), liquidity_rank=5, top_n=300, is_control=False)
     assert state and state.targets
     result = detector.track(state, archive.snapshot("ZEC"), 300)
-    assert result.wave_type == "W4" and result.targets == []
+    assert result.wave_type == "W4" and result.targets == pytest.approx([1452.88088, 1565.25, 1747.04088])
     assert "SAME CYCLE ADVANCED" in result.last_event
 
 
@@ -182,11 +185,11 @@ def test_phase_diagnostic_cannot_enter_search_top_even_with_stale_score_and_targ
     state = SeniorWaveDetector().detect(archive.snapshot("ZEC"), 5, 300)
     state.rating = 10.; state.targets = [99999.]
     assert select_top_crypto([state]) == []
-    assert _targets(state) == "после проверки стадии"
+    assert _targets(state) == "W5: 99999"
     values, flags = _row_values_flags(state, 1)
-    assert values[2] == "—" and values[4] == "W4? · кандидат"
-    assert not any(flags)
-    assert render_table_png([state], title="PHASE", subtitle="closed data", crypto_label="CHECK", version="0022").startswith(b"\x89PNG")
+    assert values[2] == "10.0" and values[4] == "W4 · сценарий"
+    assert flags[2]
+    assert render_table_png([state], title="PHASE", subtitle="closed data", crypto_label="CHECK", version="0023").startswith(b"\x89PNG")
 
 
 @pytest.mark.parametrize("cutoff", ["2026-08-01T00:00Z", "2026-08-27T00:00Z", "2026-09-20T00:00Z"])
@@ -265,15 +268,15 @@ async def test_sqlite_roundtrip_preserves_mature_phase_evidence(tmp_path, archiv
     session_id = await repo.replace_active_session("binance_spot", 300, [state])
     loaded = (await repo.tracked_states(session_id))[0]
     assert loaded.to_dict() == state.to_dict()
-    assert loaded.wave_type == "W4" and loaded.targets == []
+    assert loaded.wave_type == "W4" and loaded.targets == state.targets
 
 
 def test_independent_init_case_from_full_universe_triggers_the_same_guard(archive):
     snapshot = archive.snapshot("INIT")
     snapshot.symbol = "ANOTHER_UNSEEN_ASSET"
     state = SeniorWaveDetector().detect(snapshot, 100, 300)
-    assert state.wave_type == "W4" and state.status == "PHASE_UNCERTAIN"
-    assert not state.targets
+    assert state.wave_type == "W4" and state.status == "EXTENDED"
+    assert state.targets == pytest.approx([.10402918, .10919, .11753918])
     points = state.structure_evidence["mature_impulse"]["subwaves"]
     assert [p["price"] for p in points] == [.05234, .06993, .06336, .1019, .08464, .11659]
     h4 = complete4h(snapshot.hourly_closed).set_index("timestamp")

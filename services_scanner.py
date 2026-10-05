@@ -13,7 +13,7 @@ from config import Settings
 from core_models import MarketSnapshot, WaveState
 from core_ranking import select_top_crypto
 from core_senior import SeniorWaveDetector, control_no_setup, data_incomplete_state, no_setup_state
-from core_symbols import WALK_MAJOR_BASES, display_symbol, normalize_symbol
+from core_symbols import WALK_MAJOR_BASES, display_symbol, excluded_from_crypto_top, normalize_symbol
 from data_collector import MarketDataService
 from data_exchanges import ControlUnavailable
 from data_integrity import DataIntegrityError
@@ -289,6 +289,9 @@ class ScannerService:
                 return RunResult("track", [], 0, 0, ["NO_ACTIVE_SEARCH_SESSION"], "", 0, analysis_seconds=time.perf_counter() - started_perf)
             session_id, exchange, top_n = session
             previous = await self.repo.tracked_states(session_id)
+            # Legacy saved STOCK/stable rows must not reappear after upgrading.
+            # The stored set itself remains intact until the next Search commit.
+            previous = [s for s in previous if s.is_control or not excluded_from_crypto_top(display_symbol(s.symbol))]
             errors: list[str] = []
             skipped_controls: list[str] = []
 
@@ -587,6 +590,8 @@ class ScannerService:
                         state = self.detector.detect(snap, rank, diagnostic_top_n)
                         if state is None or (state.rating or 0.0) < self.cfg.min_rating:
                             continue
+                        if state.wave_type not in {"W2", "W3-(2)"}:
+                            continue  # /walk audits the W2/W3-(2) search strategy.
                         if not state.targets or state.strict_origin is None or state.current_price is None:
                             continue
 

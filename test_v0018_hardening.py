@@ -157,7 +157,7 @@ def test_runtime_dependencies_are_exactly_pinned_to_audited_versions():
 
 def test_v0018_is_default_and_documented():
     cfg = Settings(BOT_TOKEN="test", _env_file=None)
-    assert cfg.bot_version == "0022"
+    assert cfg.bot_version == "0023"
     root = ROOT
     for path in [root / "README.md", root / ".env.example", root / "Dockerfile"]:
-        assert "0022" in path.read_text()
+        assert "0023" in path.read_text()

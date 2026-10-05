@@ -14,6 +14,9 @@ from data_integrity import DataIntegrityError
 
 FIB_RATIOS = (0.236, 0.382, 0.500, 0.618, 0.705, 0.786, 0.886, 0.950)
 TARGET_MULTIPLIERS = (1.0, 1.618, 2.618, 4.236)
+# W5 is a separate scenario: relationships to W1 of the SAME outer degree.
+# W2/W3-(2) projection multipliers above remain unchanged.
+W5_MULTIPLIERS = (0.618, 1.0, 1.618)
 
 
 @dataclass(slots=True)
@@ -816,7 +819,8 @@ class SeniorWaveDetector:
                                 "low": float(g["w2_low"]),
                                 "low_ts": g["w2_ts"],
                                 "retrace": child_retrace,
-                                "source": "D1_PREDECESSOR_PARENT_W2" if daily_parent else "H4_INFERRED_PARENT_W2",
+                                "source": ("SPOT_CONTEXT_PARENT_W2" if daily_parent and daily_parent.get("context_market")
+                                           else "D1_PREDECESSOR_PARENT_W2" if daily_parent else "H4_INFERRED_PARENT_W2"),
                             }
             if nested is not None:
                 state = self._build_state(
@@ -903,7 +907,7 @@ class SeniorWaveDetector:
         if selected.wave_type == "W4":
             # The parent-W1 overlap boundary is stricter than the former W3
             # origin. Apply it to incomplete H1/live wicks on the first detection.
-            selected = self._track_mature_phase(selected, snapshot)
+            selected = self._track_mature_phase(selected, snapshot, top_n)
         if snapshot.history_evidence:
             selected.structure_evidence["history"] = dict(snapshot.history_evidence)
             selected.structure_evidence["ancestry_incomplete"] = snapshot.history_evidence.get("status") == "unavailable"
@@ -914,25 +918,49 @@ class SeniorWaveDetector:
 
         An old parent may precede the fresh-entry age limit. The ACTIVE child's
         three anchors must still be present in COMPLETE4H. The predecessor frame
-        is supplied only by the validated same-exchange ticker-history adapter.
+        is supplied by the validated ticker-history adapter. Spot ancestry has an
+        explicit source and is checked separately; it supplies no futures prices.
         """
         context = snapshot.daily_context
-        if context is None or context.empty or snapshot.history_evidence.get("status") != "restored":
+        if context is None or context.empty or snapshot.history_evidence.get("status") not in {"restored", "restored_spot"}:
             return None
         origin = float(child["origin"])
         origin_ts = _origin_bucket(h4, child["origin_ts"], origin)
         if origin_ts is None:
             return None
         d1 = context.sort_values("timestamp").reset_index(drop=True).copy()
+        spot_market = None
+        context_origin = origin
+        if snapshot.history_evidence.get("status") == "restored_spot":
+            from data_lineage import TRANSITIONS, validate_spot_context
+            spot_market = snapshot.history_evidence.get("spot_exchange")
+            if spot_market not in {"mexc_spot", "binance_spot"}:
+                return None
+            # Revalidate at THIS snapshot, including historical /walk cutoffs.
+            # Metadata from a later download must not authorize future candles.
+            cutoff = h4["timestamp"].iloc[-1] + pd.Timedelta(hours=4)
+            d1 = d1[d1["timestamp"] + pd.Timedelta(days=1) <= cutoff].copy()
+            futures = snapshot.daily_closed
+            futures = futures[futures["timestamp"] + pd.Timedelta(days=1) <= cutoff]
+            try:
+                validate_spot_context(d1, futures, TRANSITIONS[spot_market], cutoff)
+            except DataIntegrityError:
+                return None
+            same_day = d1[d1["timestamp"].eq(origin_ts.floor("D"))]
+            if len(same_day) != 1:
+                return None
+            context_origin = float(same_day["low"].iloc[0])
+            if abs(origin / context_origin - 1) > .05:
+                return None
         d1["atr"] = _atr(d1)
         pre = d1[d1["timestamp"] < origin_ts.floor("D")]
         highs = pre.index[_pivot_mask(pre["high"], self.cfg.daily_pivot_window, "high").fillna(False)]
         for hi in reversed(highs.tolist()):
             high, high_ts = float(d1.at[hi, "high"]), d1.at[hi, "timestamp"]
-            if high <= origin:
+            if high <= context_origin:
                 continue
             correction = d1[(d1["timestamp"] > high_ts) & (d1["timestamp"] <= origin_ts.floor("D"))]
-            if correction.empty or not self._same_level(float(correction["low"].min()), origin):
+            if correction.empty or not self._same_level(float(correction["low"].min()), context_origin):
                 continue
             # Even a hidden 4H closing breakout would require the day's HIGH to
             # exceed the old peak. Do not infer an unbroken correction otherwise.
@@ -944,18 +972,20 @@ class SeniorWaveDetector:
             li = before["low"].idxmin()
             root, root_ts = float(d1.at[li, "low"]), d1.at[li, "timestamp"]
             length = high - root
-            if not 0 < root < origin or high / root - 1 < self.cfg.min_global_impulse_pct:
+            if not 0 < root < context_origin or high / root - 1 < self.cfg.min_global_impulse_pct:
                 continue
             atr = float(d1.at[li, "atr"])
             if math.isfinite(atr) and length < self.cfg.min_global_atr_mult * atr:
                 continue
             if float(d1.loc[li:hi, "high"].max()) > high:
                 continue
-            retrace = (high - origin) / length
+            retrace = (high - context_origin) / length
             if self.cfg.min_w2_retrace <= retrace <= self.cfg.max_w2_retrace:
                 return {"origin": root, "origin_day": _iso(root_ts), "high": high,
                         "high_day": _iso(high_ts), "w2_low": origin, "w2_ts": _iso(origin_ts),
-                        "retrace": retrace, "timeframe": "1D_CONTEXT_ONLY"}
+                        "retrace": retrace, "timeframe": "1D_CONTEXT_ONLY",
+                        **({"context_market": spot_market, "context_w2_low": context_origin,
+                            "usage": "Spot ancestry only; futures projection anchors unchanged"} if spot_market else {})}
         return None
 
     def _prefer_senior_parent(self, snapshot: MarketSnapshot, h4: pd.DataFrame,
@@ -1007,7 +1037,8 @@ class SeniorWaveDetector:
                     # The parent impulse continued to a higher wick before W2;
                     # its earlier daily pivot cannot stand in for the endpoint.
                     continue
-                if not root < child_origin < state.origin or child_origin >= state.working_low:
+                same_origin = self._same_level(child_origin, state.origin)
+                if not root < child_origin or (child_origin > state.origin and not same_origin) or child_origin >= state.working_low:
                     continue
                 retrace = (peak - child_origin) / length
                 if not self.cfg.min_w2_retrace <= retrace <= self.cfg.max_w2_retrace:
@@ -1027,6 +1058,13 @@ class SeniorWaveDetector:
                 if not self.cfg.min_nested_retrace <= child_retrace <= self.cfg.max_nested_retrace:
                     continue
                 origin_ts = _origin_bucket(h4, child_day, child_origin)
+                origin_timeframe = "COMPLETE4H"
+                if origin_ts is None and same_origin and _utc(state.impulse_start_ts).floor("D") == child_day:
+                    # Degree-only correction: the existing origin is already an
+                    # exact closed-D1 extreme. Do not move that anchor or claim an
+                    # invented H4 timestamp when the archive starts later.
+                    origin_ts = _utc(state.impulse_start_ts)
+                    origin_timeframe = "1D"
                 # If parent high is covered, verify W2 against the exact first
                 # COMPLETE4H acceptance, including that candle's low.
                 parent_peaks = h4[(h4["timestamp"] >= peak_day) & (h4["timestamp"] < peak_day + pd.Timedelta(days=1)) & h4["high"].eq(peak)]
@@ -1049,7 +1087,8 @@ class SeniorWaveDetector:
                 evidence = {"origin": root, "origin_day": _iso(root_day), "high": peak,
                             "high_day": _iso(peak_day), "high_ts": _iso(parent_high_ts),
                             "w2_low": child_origin, "w2_day": _iso(child_day),
-                            "w2_ts": _iso(origin_ts), "retrace": retrace}
+                            "w2_ts": _iso(origin_ts), "retrace": retrace,
+                            "w2_timeframe": origin_timeframe}
                 # Earlier intact parent defines the senior degree. Smaller
                 # internal 212/239-type corrections remain diagnostic substructure.
                 candidates.append((root_day, peak_day, child_day, evidence, child_retrace))
@@ -1088,7 +1127,8 @@ class SeniorWaveDetector:
         corrections are frozen at their first closing breakouts. Their chronology,
         non-overlap and third-wave length must support an impulse before this guard
         suppresses fresh W2/W3-(2) projections. An extension can have the same shape:
-        report W4 as a CANDIDATE, never a unique/confirmed Elliott count or W5 targets.
+        select W4 as a scenario, never a unique/confirmed Elliott count. The W4
+        tracker derives its separate W5 projections from the outer W1.
         """
         if state.status in {"DATA_INCOMPLETE", "INVALID", "RECOUNT"}:
             return state
@@ -1101,6 +1141,9 @@ class SeniorWaveDetector:
                            and _utc(g["w2_ts"]) == _utc(state.impulse_start_ts)
                            and g["origin"] < state.origin), None)
         if not parent or parent.get("w2_ts") is None:
+            return state
+        if parent.get("context_market"):
+            # Spot prices may prove ancestry, never a futures overlap boundary.
             return state
         evidence = self._mature_impulse_evidence(h4, daily, state, parent)
         if evidence is None:
@@ -1419,49 +1462,103 @@ class SeniorWaveDetector:
         previous.strict_distance_pct = None
         previous.rating = 0.0
 
-    def _track_mature_phase(self, previous: WaveState, snapshot: MarketSnapshot) -> WaveState:
-        """Retain observed degree when a rolling history window loses its origin."""
+    def _track_mature_phase(self, previous: WaveState, snapshot: MarketSnapshot, top_n: int = 300) -> WaveState:
+        """Follow the explicit W4/W5 scenario, retaining its proven outer degree.
+
+        W4 depth/recovery uses W3. W5 targets use outer W1 (not all of W3).
+        Only COMPLETE4H can move the low or accept W5; H1/live can invalidate.
+        """
         evidence = previous.structure_evidence["mature_impulse"]
+        parent = evidence.get("parent", {})
         h4 = complete4h(snapshot.hourly_closed)
         seen = _utc(previous.last_complete4h_bucket) if previous.last_complete4h_bucket else None
         if not h4.empty and seen is not None and h4["timestamp"].iloc[-1] < seen:
             raise DataIntegrityError("tracking COMPLETE4H checkpoint moved backwards")
+        previous.current_price = snapshot.live_price or previous.current_price
+        previous.updated_at = datetime.now(timezone.utc).isoformat()
+        previous.detector_version = "0023"
+        anchors = [previous.origin, previous.impulse_high, previous.working_low,
+                   parent.get("origin"), parent.get("high")]
+        if any(x is None or not math.isfinite(float(x)) or float(x) <= 0 for x in anchors):
+            previous.status = "RECOUNT"
+            self._clear_derived(previous, fib_status="MISSING W4/W5 ANCHORS")
+            previous.last_event = "MISSING W4/W5 ANCHORS"
+            return previous
+        origin, high, low, w1_origin, w1_high = map(float, anchors)
+        if not (w1_origin < origin < w1_high < low < high):
+            previous.status = "RECOUNT"
+            self._clear_derived(previous, fib_status="INVALID W4/W5 GEOMETRY")
+            return previous
         h1 = snapshot.hourly_closed.copy()
         h1["timestamp"] = pd.to_datetime(h1["timestamp"], utc=True)
         cut = seen + pd.Timedelta(hours=4) if seen is not None else _utc(previous.impulse_high_ts) + pd.Timedelta(hours=4)
         fresh_h1 = h1[h1["timestamp"] >= cut]
-        boundary = float(evidence["outer_w1_high"])
-        overlap = (not fresh_h1.empty and float(fresh_h1["low"].min()) <= boundary)
-        overlap = overlap or (snapshot.live_low is not None and snapshot.live_low <= boundary)
-        previous.current_price = snapshot.live_price or previous.current_price
-        previous.updated_at = datetime.now(timezone.utc).isoformat()
-        previous.detector_version = "0022"
-        self._clear_derived(previous, fib_status="СТАДИЯ ТРЕБУЕТ ПРОВЕРКИ")
+        accepted_at = evidence.get("next_high_accepted_at")
+        boundary = low if accepted_at else w1_high
+        lows = fresh_h1["low"].tolist()
+        if snapshot.live_low is not None:
+            lows.append(snapshot.live_low)
+        overlap = any(x < boundary if accepted_at else x <= boundary for x in lows)
         if overlap:
             previous.status = "RECOUNT"
-            previous.fib_status = "W4 OVERLAPS W1 — RECOUNT"
-            previous.last_event = "W4 CANDIDATE INVALIDATED — FULL SENIOR RECOUNT REQUIRED"
+            self._clear_derived(previous, fib_status="W5 ORIGIN BROKEN — RECOUNT" if accepted_at else "W4 OVERLAPS W1 — RECOUNT")
+            previous.last_event = "W4/W5 SCENARIO INVALIDATED — FULL SENIOR RECOUNT REQUIRED"
             return previous
-        previous.status = "PHASE_UNCERTAIN"
         if h4.empty:
-            previous.last_event = "INCOMPLETE — RETAINED MATURE PHASE"
+            previous.last_event = "INCOMPLETE — RETAINED W4/W5 SCENARIO"
             return previous
         fresh = h4[h4["timestamp"] >= cut]
-        accepted_at = evidence.get("next_high_accepted_at")
-        accepted = fresh[fresh["close"] > previous.impulse_high]
+        accepted = fresh[fresh["close"] > high]
         if accepted_at is None and not accepted.empty:
             accepted_at = _iso(accepted["timestamp"].iloc[0])
             evidence["next_high_accepted_at"] = accepted_at
-            evidence["phase"] = "AFTER_W4_CANDIDATE"
         eligible = fresh if accepted_at is None else fresh[fresh["timestamp"] <= _utc(accepted_at)]
+        reanchored = False
         if not eligible.empty:
             idx = eligible["low"].idxmin()
-            if float(eligible.at[idx, "low"]) < previous.working_low:
-                previous.working_low = float(eligible.at[idx, "low"])
+            if float(eligible.at[idx, "low"]) < low:
+                low = float(eligible.at[idx, "low"])
+                previous.working_low = low
                 previous.working_low_ts = _iso(eligible.at[idx, "timestamp"])
+                reanchored = True
+        # A batch may contain acceptance followed by loss of the W5 origin.
+        if accepted_at and ((h1[(h1["timestamp"] >= _utc(accepted_at) + pd.Timedelta(hours=4))]["low"] < low).any()
+                            or snapshot.live_low is not None and snapshot.live_low < low):
+            previous.status = "RECOUNT"
+            self._clear_derived(previous, fib_status="W5 ORIGIN BROKEN — RECOUNT")
+            previous.last_event = "W5 ORIGIN BROKEN AFTER ACCEPTANCE"
+            return previous
+        previous.wave_type = "W5" if accepted_at else "W4"
+        evidence["phase"] = "W5_SCENARIO" if accepted_at else "W4_SCENARIO"
+        previous.strict_origin = low if accepted_at else w1_high
+        previous.retrace_depth = (high - low) / (high - origin)
+        previous.fibs = _fib_prices(origin, high)
+        previous.fib_status, _ = _recovery(h4, previous.fibs, previous.working_low_ts)
         previous.last_complete4h_bucket = _iso(h4["timestamp"].iloc[-1])
         previous.last_complete4h_close = float(h4["close"].iloc[-1])
-        previous.last_event = "MATURE PHASE RETAINED — NO W2/W3-(2) PROJECTION"
+        previous.current_price = snapshot.live_price or previous.last_complete4h_close
+        previous.growth_from_low_pct = (previous.current_price / low - 1) * 100
+        previous.strict_distance_pct = (low / previous.strict_origin - 1) * 100
+        length = w1_high - w1_origin
+        multipliers = [m for m in W5_MULTIPLIERS if high - origin >= length or m * length <= high - origin]
+        previous.targets = [low + m * length for m in multipliers]
+        previous.target_origin, previous.target_impulse_high = w1_origin, w1_high
+        previous.target_impulse_length = length
+        previous.target_source = "W5 scenario: W4 low + (0.618 / 1.000 / 1.618) × outer W1"
+        evidence["w5_multipliers"] = multipliers
+        evidence["w5_below_w3_high"] = [i for i, target in enumerate(previous.targets, 1) if target <= high]
+        hits = _reached_targets(snapshot, previous.working_low_ts, previous.targets)
+        previous.targets_hit = sorted(set(hits) | (set() if reanchored else set(previous.targets_hit)))
+        previous.base_zone, previous.deep_zone = _zones(low, high, w1_high)
+        if accepted_at:
+            # The correction has finished; old W4 entry zones are no longer live.
+            previous.base_zone = previous.deep_zone = None
+        upside = 0.0 if 1 in previous.targets_hit else (previous.targets[0] / previous.current_price - 1) * 100
+        previous.rating = _rating(previous.retrace_depth, previous.growth_from_low_pct,
+            previous.strict_distance_pct, previous.fib_status, previous.liquidity_rank,
+            top_n, previous.wave_type, upside)
+        previous.status = "EXTENDED" if accepted_at or previous.targets_hit else _status_from_state(previous.growth_from_low_pct, previous.fib_status)
+        previous.last_event = "W4 RE-ANCHOR COMPLETE4H" if reanchored else ("W5 ACCEPTED — W4 LOW LOCKED" if accepted_at else "W4 SCENARIO UPDATED")
         return previous
 
     def track(self, previous: WaveState, snapshot: MarketSnapshot, top_n: int) -> WaveState:
@@ -1482,8 +1579,8 @@ class SeniorWaveDetector:
             previous.updated_at = now
             return previous
 
-        if previous.wave_type == "W4" and previous.structure_evidence.get("mature_impulse"):
-            return self._track_mature_phase(previous, snapshot)
+        if previous.wave_type in {"W4", "W5"} and previous.structure_evidence.get("mature_impulse"):
+            return self._track_mature_phase(previous, snapshot, top_n)
 
         # Controls with no setup may be re-scanned because XAU/USOIL are permanent controls.
         if previous.wave_type == "CONTROL" or previous.status == "NO_SETUP":
@@ -1542,22 +1639,22 @@ class SeniorWaveDetector:
 
         ancestry_restored = (
             previous.structure_evidence.get("ancestry_incomplete")
-            and snapshot.history_evidence.get("status") == "restored"
+            and snapshot.history_evidence.get("status") in {"restored", "restored_spot"}
         )
         senior_history_restored = previous.structure_evidence.get("senior_history_incomplete", False)
-        if previous.detector_version != "0022" or ancestry_restored or senior_history_restored:
+        if previous.detector_version != "0023" or ancestry_restored or senior_history_restored:
             rebuilt = self.detect(snapshot, previous.liquidity_rank, top_n)
             if rebuilt is not None:
                 rebuilt.is_control = previous.is_control
                 rebuilt.created_at = previous.created_at or rebuilt.created_at
                 rebuilt.last_event = (
                     "HISTORY RESTORED — SAME-SYMBOL ANCESTRY RECOUNT" if ancestry_restored
-                    else "V0022 SAME-SYMBOL RECOUNT — LEGACY ANCHORS REPLACED"
+                    else "V0023 SAME-SYMBOL RECOUNT — LEGACY ANCHORS REPLACED"
                 )
                 return rebuilt
             previous.status = "RECOUNT"
-            self._clear_derived(previous, fib_status="V0022 RECOUNT REQUIRED")
-            previous.last_event = "V0022 — LEGACY ANCHORS NOT CONFIRMED"
+            self._clear_derived(previous, fib_status="V0023 RECOUNT REQUIRED")
+            previous.last_event = "V0023 — LEGACY ANCHORS NOT CONFIRMED"
             previous.updated_at = now
             return previous
         new_h4 = h4 if last_seen is None else h4[h4["timestamp"] > last_seen]
@@ -1586,7 +1683,7 @@ class SeniorWaveDetector:
                 if same_cycle:
                     phase.is_control = previous.is_control
                     phase.created_at = previous.created_at or phase.created_at
-                    phase.last_event = "SAME CYCLE ADVANCED — POSSIBLE W4; OLD TARGETS WITHHELD"
+                    phase.last_event = "SAME CYCLE ADVANCED — W4 SCENARIO; W5 TARGETS"
                     return phase
         # Once a correction's projection high has been accepted above on COMPLETE4H,
         # that particular W2/W3-(2) is structurally complete.  Keep its historical

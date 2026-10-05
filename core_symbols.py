@@ -36,8 +36,10 @@ LEVERAGED_BASES = frozenset(
 
 def excluded_from_crypto_top(base: str) -> bool:
     """Return True only for explicit non-crypto-top instruments."""
+    base = base.upper()
     return (
-        base in STABLE_BASES
+        "STOCK" in base
+        or base in STABLE_BASES
         or base in CONTROL_BASES
         or base in COMMODITY_DUPLICATE_BASES
         or base in LEVERAGED_BASES

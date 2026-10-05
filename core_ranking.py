@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from core_models import WaveState
+from core_symbols import display_symbol, excluded_from_crypto_top
 import math
 import re
 
@@ -20,6 +21,7 @@ def ranking_key(state: WaveState) -> tuple:
 def select_top_crypto(states: list[WaveState]) -> list[WaveState]:
     """Return the hard TOP-10 crypto setups by displayed Rating, excluding controls."""
     crypto = [state for state in states if not state.is_control
-              and state.wave_type != "W4" and state.status != "PHASE_UNCERTAIN"]
+              and state.wave_type not in {"W4", "W5"} and state.status != "PHASE_UNCERTAIN"
+              and not excluded_from_crypto_top(display_symbol(state.symbol))]
     crypto.sort(key=ranking_key)
     return crypto[:SEARCH_TOP_CRYPTO]

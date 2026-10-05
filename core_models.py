@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 
-WaveType = Literal["W2", "W3-(2)", "W4", "CONTROL", "NONE"]
+WaveType = Literal["W2", "W3-(2)", "W4", "W5", "CONTROL", "NONE"]
 WaveStatus = Literal[
     "FORMING",
     "DEEP",
@@ -49,7 +49,7 @@ class WaveState:
     target_impulse_length: float | None = None
     target_source: str | None = None
     targets_hit: list[int] = field(default_factory=list)
-    detector_version: str = "0022"
+    detector_version: str = "0023"
     structure_evidence: dict[str, Any] = field(default_factory=dict)
     base_zone: tuple[float, float] | None = None
     deep_zone: tuple[float, float] | None = None

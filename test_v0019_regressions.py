@@ -28,7 +28,7 @@ def archive():
     # v0021: retain the larger D1 parent, not the inner 212.8/239 corrections.
     ("BCH", 199.7, 366.4, 296.1, "W3-(2)"),
     ("GRAM", 1.286, 1.740, 1.460, "W2"),
-    ("USOIL", 74.36, 108.88, 88.31, "W2"),
+    ("USOIL", 74.36, 108.88, 88.31, "W3-(2)"),
     ("XAU", 3948.4, 4701.48, 4116.59, "W2"),
 ])
 def test_real_archive_public_detector_anchors_and_decimal_projection(archive, asset, origin, high, low, wave):
@@ -42,7 +42,12 @@ def test_real_archive_public_detector_anchors_and_decimal_projection(archive, as
     assert h4.at[pd.Timestamp(state.impulse_high_ts), "high"] == high
     assert h4.at[pd.Timestamp(state.working_low_ts), "low"] == low
     if wave == "W3-(2)":
-        assert h4.at[pd.Timestamp(state.parent_w2_ts), "low"] == origin
+        if state.structure_evidence.get("senior_parent", {}).get("w2_timeframe") == "1D":
+            # v0023 can correct degree without replacing the existing exact D1
+            # origin. It explicitly does not claim unavailable older H4 timing.
+            assert snapshot.daily_closed.set_index("timestamp").at[pd.Timestamp(state.parent_w2_ts), "low"] == origin
+        else:
+            assert h4.at[pd.Timestamp(state.parent_w2_ts), "low"] == origin
         assert pd.Timestamp(state.parent_w2_ts) < pd.Timestamp(state.impulse_high_ts) < pd.Timestamp(state.working_low_ts)
     length = Decimal(str(high)) - Decimal(str(origin))
     expected = [Decimal(str(low)) + m * length for m in map(Decimal, ("1", "1.618", "2.618", "4.236"))]

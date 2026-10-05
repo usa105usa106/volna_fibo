@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import io
 import json
+import math
 import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from pathlib import Path
@@ -80,13 +81,14 @@ def _targets(state: WaveState) -> str:
         return "after recount"
     if state.status == "DATA_INCOMPLETE":
         return "—"
-    if state.wave_type == "W4" or state.status == "PHASE_UNCERTAIN":
+    if state.status == "PHASE_UNCERTAIN":
         return "после проверки стадии"
     if state.targets:
         remaining = [(i, x) for i, x in enumerate(state.targets[:4], 1) if i not in state.targets_hit]
         if not remaining:
-            return "T1–T4 достигнуты"
-        return " / ".join((f"T{i}: " if state.targets_hit else "") + _fmt(x) for i, x in remaining)
+            return f"T1–T{len(state.targets)} достигнуты"
+        result = " / ".join((f"T{i}: " if state.targets_hit else "") + _fmt(x) for i, x in remaining)
+        return "W5: " + result if state.wave_type in {"W4", "W5"} else result
     return "—"
 
 
@@ -151,13 +153,20 @@ def _row_values_flags(state: WaveState, rank: int | None) -> tuple[list[str], li
         wave += " · late"
     if not invalid and state.structure_evidence.get("ancestry_incomplete"):
         wave = "степень? · нет истории TON"
+    if not invalid and state.wave_type in {"W4", "W5"}:
+        wave = f"{state.wave_type} · сценарий"
+    elif not invalid and state.structure_evidence.get("daily_parent", {}).get("context_market"):
+        wave += " · спот-контекст"
+    low = _fmt(state.working_low)
+    if not invalid and state.working_low is not None and state.retrace_depth is not None and math.isfinite(state.retrace_depth):
+        low += f" · {state.retrace_depth * 100:.2f}%"
     values = [
         str(rank if rank is not None else "—"),
         display_symbol(state.symbol),
         rating,
         _fmt(state.current_price),
         wave,
-        _fmt(state.working_low),
+        low,
         state.fib_status or "—",
         growth,
         _zone(state.base_zone),

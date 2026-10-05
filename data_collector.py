@@ -8,7 +8,7 @@ import httpx
 
 from config import Settings
 from core_models import MarketSnapshot
-from data_exchanges import BinanceSpotClient, ControlUnavailable, MexcFuturesClient
+from data_exchanges import BinanceSpotClient, ControlUnavailable, MexcFuturesClient, MexcSpotHistoryClient
 from data_integrity import IntegrityPolicy, validate_candles
 from data_integrity import DataIntegrityError
 from data_lineage import load_daily_context, transition_for
@@ -19,8 +19,9 @@ class MarketDataService:
     """Fresh exchange-only market-data loader.
 
     No parquet/database candle cache exists. Current candles and documented ticker
-    predecessor context are downloaded from the selected exchange itself. Tracking
-    persists senior-wave state and provenance, never OHLC history.
+    predecessor context are downloaded fresh. For documented TON/GRAM ancestry,
+    separately validated spot context is allowed when futures history is missing.
+    Tracking persists senior-wave state and provenance, never OHLC history.
     """
 
     def __init__(self, settings: Settings):
@@ -37,6 +38,9 @@ class MarketDataService:
             "binance_spot": BinanceSpotClient(self.http, **client_kwargs),
             "mexc_futures": MexcFuturesClient(self.http, **client_kwargs),
         }
+        self.spot_history_clients = (
+            MexcSpotHistoryClient(self.http, **client_kwargs), self.clients["binance_spot"],
+        )
         self.sem = asyncio.Semaphore(self.settings.http_concurrency)
 
     async def reset_runtime_state(self) -> None:
@@ -142,7 +146,8 @@ class MarketDataService:
 
         context, history = None, {}
         if transition_for(exchange, symbol) is not None:
-            context, history = await load_daily_context(self.clients[exchange], symbol, d1, d1_start, now)
+            context, history = await load_daily_context(self.clients[exchange], symbol, d1, d1_start, now,
+                                                        spot_clients=self.spot_history_clients)
 
         return MarketSnapshot(
             symbol=symbol,

@@ -134,7 +134,7 @@ def test_upgrade_recounts_existing_symbol_and_replaces_stored_v0020_targets(arch
     result = SeniorWaveDetector().track(old, snap, 300)
     assert result.symbol == asset and result.origin == expected
     assert result.targets == current.targets
-    assert result.detector_version == "0022"
+    assert result.detector_version == "0023"
 
 
 def test_invalid_legacy_count_never_revives_on_version_upgrade(archive):

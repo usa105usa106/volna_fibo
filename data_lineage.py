@@ -1,4 +1,4 @@
-"""Explicit, same-exchange ticker ancestry. Never infer identity from a name.
+"""Documented ticker ancestry with an explicit separate spot-context fallback.
 
 The old unrelated GRAM token on MEXC must NOT be joined to Toncoin. Only the
 documented TON -> GRAM transition below is supported. Older daily candles are
@@ -29,6 +29,11 @@ class TickerTransition:
 
 
 TRANSITIONS = {
+    "mexc_spot": TickerTransition(
+        "mexc_spot", "GRAMUSDT", "TONUSDT",
+        "2026-06-15T12:00:00Z", "2026-06-15T10:00:00Z",
+        ("https://www.mexc.com/announcements/article/mexc-to-rename-toncoin-ton-to-gram-gram-17827791536125",),
+    ),
     "binance_spot": TickerTransition(
         "binance_spot", "GRAMUSDT", "TONUSDT",
         "2026-07-02T08:00:00Z", "2026-06-30T03:00:00Z",
@@ -179,13 +184,42 @@ async def binance_predecessor_daily(client, rule: TickerTransition, start, end) 
     return prefix.copy(), files
 
 
-async def load_daily_context(client, symbol: str, current: pd.DataFrame, start, now) -> tuple[pd.DataFrame | None, dict]:
+def validate_spot_context(context: pd.DataFrame, futures: pd.DataFrame, spot_rule: TickerTransition, now) -> dict:
+    """Check identity/overlap without copying spot prices into futures candles.
+
+    A 5% maximum daily-close basis is a data compatibility guard, not a price
+    conversion. No normalization/rescaling of either market is performed.
+    """
+    if not {"source_exchange", "source_symbol"}.issubset(context.columns):
+        raise DataIntegrityError("spot context lacks provenance")
+    if not context["source_exchange"].eq(spot_rule.exchange).all():
+        raise DataIntegrityError("spot context exchange mismatch")
+    expected = context["timestamp"].map(lambda ts: spot_rule.predecessor if ts < pd.Timestamp(spot_rule.current_start).floor("D") else spot_rule.current)
+    if not context["source_symbol"].eq(expected).all():
+        raise DataIntegrityError("spot context ticker mismatch")
+    futures = validate_candles(futures, IntegrityPolicy("1d", False, False), now)
+    overlap = futures[["timestamp", "close"]].merge(context[["timestamp", "close"]], on="timestamp", suffixes=("_future", "_spot"))
+    # Listing days are partial and differ between markets.
+    overlap = overlap[overlap.timestamp > pd.Timestamp(spot_rule.current_start).floor("D")]
+    if len(overlap) < 14:
+        raise DataIntegrityError("spot context needs 14 overlapping daily candles")
+    basis = (overlap.close_future / overlap.close_spot - 1).abs()
+    if basis.max() > .05:
+        raise DataIntegrityError("spot/futures close basis exceeds 5% compatibility limit")
+    if overlap.timestamp.max() != futures.timestamp.max():
+        raise DataIntegrityError("spot context is truncated before the futures snapshot")
+    return {"overlap_days": len(overlap), "max_abs_close_basis": float(basis.max()), "basis_limit": .05}
+
+
+async def load_daily_context(client, symbol: str, current: pd.DataFrame, start, now, *, spot_clients=()) -> tuple[pd.DataFrame | None, dict]:
     rule = transition_for(client.name, symbol)
     if rule is None:
         return None, {}
     if pd.Timestamp(start) >= pd.Timestamp(rule.current_start).floor("D"):
         return None, history_metadata(rule, "not_requested", detail="requested lookback starts after the ticker transition")
     try:
+        if current.empty:
+            raise DataIntegrityError("empty current ticker history")
         seam = current["timestamp"].iloc[0]
         if client.name == "binance_spot":
             prefix, files = await binance_predecessor_daily(client, rule, start, seam)
@@ -197,6 +231,23 @@ async def load_daily_context(client, symbol: str, current: pd.DataFrame, start, 
             evidence["archives"] = files
         return context, evidence
     except (httpx.HTTPError, ValueError, KeyError, RuntimeError, OSError) as exc:
-        # Cancellation is BaseException and propagates to Search/Reset. Missing
-        # ancestry is reported explicitly, never replaced with another exchange.
-        return None, history_metadata(rule, "unavailable", detail=f"{type(exc).__name__}: {exc}"[:240])
+        # Cancellation is BaseException and propagates through all fallback calls.
+        detail = f"{type(exc).__name__}: {exc}"[:240]
+    attempts = [{"exchange": client.name, "detail": detail}]
+    if client.name == "mexc_futures":
+        for spot in spot_clients:
+            spot_rule = TRANSITIONS.get(spot.name)
+            if spot_rule is None or spot.name not in {"mexc_spot", "binance_spot"}:
+                continue
+            try:
+                spot_current, _, _ = await spot.candles(spot_rule.current, "1d", pd.Timestamp(start).to_pydatetime(), now)
+                context, info = await load_daily_context(spot, spot_rule.current, spot_current, start, now)
+                if context is None:
+                    raise DataIntegrityError(info.get("detail", "spot predecessor unavailable"))
+                basis = validate_spot_context(context, current, spot_rule, now)
+                return context, history_metadata(rule, "restored_spot", spot_exchange=spot.name,
+                    spot_history=info, compatibility=basis, attempts=attempts,
+                    usage="Separate ancestry context; active anchors and targets remain futures-only")
+            except (httpx.HTTPError, ValueError, KeyError, RuntimeError, OSError) as exc:
+                attempts.append({"exchange": spot.name, "detail": f"{type(exc).__name__}: {exc}"[:240]})
+    return None, history_metadata(rule, "unavailable", detail=detail, attempts=attempts)

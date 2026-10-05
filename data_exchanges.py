@@ -302,3 +302,61 @@ class MexcFuturesClient(ExchangeClient):
         if raw.empty:
             return pd.DataFrame(), None, None
         return _candle_result(raw, timeframe, end, is_control=symbol in {"XAU_USDT", "USOIL_USDT"})
+
+
+class MexcSpotHistoryClient(ExchangeClient):
+    """Read-only spot D1 context for documented ticker transitions.
+
+    Shares the service's HTTP pool, retry and cancellation lifecycle. This is not
+    a new trading universe and never supplies live futures prices or H1 candles.
+    """
+    name = "mexc_spot"
+    base_url = "https://api.mexc.com"
+
+    async def top_symbols(self, n: int) -> list[tuple[str, float]]:
+        raise NotImplementedError("spot history client has no scanner universe")
+
+    async def control_symbols(self) -> dict[str, str]:
+        return {}
+
+    async def candles(self, symbol: str, timeframe: str, start: datetime, end: datetime):
+        if timeframe != "1d" or symbol not in {"TONUSDT", "GRAMUSDT"}:
+            raise ValueError("MEXC spot context supports documented TON/GRAM daily history only")
+        step = 86_400_000
+        cursor, end_ms = int(start.timestamp() * 1000), int(end.timestamp() * 1000)
+        rows = []
+        for _ in range(24):
+            if cursor >= end_ms:
+                break
+            response = await self._get(f"{self.base_url}/api/v3/klines", params={
+                "symbol": symbol, "interval": "1d", "startTime": cursor,
+                "endTime": end_ms - 1, "limit": 500})
+            response.raise_for_status()
+            batch = response.json()
+            if not isinstance(batch, list) or len(batch) > 500:
+                raise ExchangeAPIError("MEXC spot: invalid kline response")
+            if not batch:
+                break
+            if any(not isinstance(row, list) or len(row) != 8 for row in batch):
+                raise DataIntegrityError("MEXC spot: invalid kline row")
+            opens = [int(row[0]) for row in batch]
+            if any(t % step for t in opens):
+                raise DataIntegrityError("MEXC spot: daily candle is not UTC aligned")
+            if any(t < cursor or t >= end_ms for t in opens) or opens != sorted(opens):
+                raise DataIntegrityError("MEXC spot: candle outside requested window or cursor stalled")
+            if any(int(row[6]) not in {int(row[0]) + step, int(row[0]) + step - 1} for row in batch):
+                raise DataIntegrityError("MEXC spot: invalid candle close_time")
+            rows.extend(batch)
+            cursor = opens[-1] + step
+            if len(batch) < 500:
+                break
+        else:
+            raise DataIntegrityError("MEXC spot: history exceeds pagination bound")
+        if not rows:
+            return pd.DataFrame(), None, None
+        raw = pd.DataFrame(rows, columns=["open_time", "open", "high", "low", "close", "volume", "close_time", "quote_volume"])
+        raw["timestamp"] = pd.to_datetime(raw.open_time, unit="ms", utc=True)
+        raw = restrict_current_history(raw, self.name, symbol, timeframe)
+        if raw.empty:
+            return pd.DataFrame(), None, None
+        return _candle_result(raw[["timestamp", "open", "high", "low", "close", "volume"]], timeframe, end, is_control=False)
