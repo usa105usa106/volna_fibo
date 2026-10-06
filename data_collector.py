@@ -8,6 +8,9 @@ import httpx
 
 from config import Settings
 from core_models import MarketSnapshot
+from core_majors import is_major
+from core_major_rules import HISTORY_START, FULL_DAILY_START, cross_asset_context
+from core_senior import complete4h
 from core_symbols import CONTROL_BASES
 from data_exchanges import BinanceFuturesClient, BinanceSpotClient, ControlUnavailable, MexcFuturesClient, MexcSpotHistoryClient
 from data_integrity import IntegrityPolicy, validate_candles
@@ -119,6 +122,9 @@ class MarketDataService:
     ) -> MarketSnapshot:
         is_control = symbol in CONTROL_BASES
         source_exchange = exchange
+        if is_major(symbol):
+            h1_start = min(h1_start, HISTORY_START.to_pydatetime())
+            d1_start = FULL_DAILY_START.to_pydatetime()
 
         # Resolve a commodity once per snapshot from the selected exchange itself.
         # There is deliberately no cross-exchange or Yahoo fallback.
@@ -137,6 +143,7 @@ class MarketDataService:
         h1_result, d1_result = await gather_owned(h1_task, d1_task)
         h1, live_price, live_low = h1_result
         d1, d_live_price, d_live_low = d1_result
+        live_candle = h1.attrs.get("live_candle")
 
         h1 = validate_candles(h1, IntegrityPolicy("1h", is_control, check_freshness), now)
         d1 = validate_candles(d1, IntegrityPolicy("1d", is_control, check_freshness), now)
@@ -156,6 +163,22 @@ class MarketDataService:
             context, history = await load_daily_context(self.clients[exchange], symbol, d1, d1_start, now,
                                                         spot_clients=self.spot_history_clients)
 
+        cross = {}
+        if is_major(symbol):
+            # Optional supporting evidence; a peer outage cannot invalidate a USD count.
+            from core_symbols import display_symbol, normalize_symbol
+            base = display_symbol(symbol)
+            peer = normalize_symbol(exchange, "ETH" if base == "BTC" else "BTC")
+            try:
+                peer_h1, _, _ = await self._candles(exchange, peer, "1h", now-timedelta(days=8), now)
+                peer_h1 = validate_candles(peer_h1, IntegrityPolicy("1h", False, check_freshness), now)
+                own4, peer4 = complete4h(h1.tail(8*24)), complete4h(peer_h1)
+                cross = cross_asset_context(own4 if base=="ETH" else peer4,
+                                            peer4 if base=="ETH" else own4, exchange)
+            except Exception as exc:  # noqa: BLE001 -- optional peer outage must never invalidate the USD count
+                cross = {"status": "UNAVAILABLE", "score": 0.0, "market": exchange,
+                         "objective": [.07, .08], "reason": type(exc).__name__}
+
         return MarketSnapshot(
             symbol=symbol,
             exchange=source_exchange,
@@ -166,6 +189,9 @@ class MarketDataService:
             daily_closed=d1,
             daily_context=context,
             history_evidence=history,
+            live_candle=live_candle,
+            observed_at=now.isoformat(),
+            cross_asset=cross,
         )
 
 

@@ -34,7 +34,8 @@ def archive():
 def test_real_zec_completed_subdivision_blocks_false_fresh_w3_2(archive):
     snap = archive.snapshot("ZEC")
     state = SeniorWaveDetector().detect(snap, archive.rank("ZEC"), 300)
-    assert (state.wave_type, state.status) == ("W4", "CONFIRMED")
+    assert (state.wave_type, state.status) == ("W4", "DEEP")
+    assert state.fib_status == "<R.236 · 0 C4H"
     assert (state.origin, state.impulse_high, state.working_low) == (368.03, 1698., 1271.09)
     assert state.strict_origin == 544.28
     assert state.targets == pytest.approx([1452.88088, 1565.25, 1747.04088])
@@ -106,7 +107,8 @@ def test_track_retains_mature_phase_when_rolling_window_loses_all_parent_anchors
     snap.hourly_closed = snap.hourly_closed.tail(300)
     snap.daily_closed = snap.daily_closed.tail(45)
     result = SeniorWaveDetector().track(saved, snap, 300)
-    assert result.wave_type == "W4" and result.status == "CONFIRMED"
+    assert result.wave_type == "W4" and result.status == "DEEP"
+    assert result.fib_status == "<R.236 · 0 C4H"
     assert result.structure_evidence["mature_impulse"] == state.structure_evidence["mature_impulse"]
     assert result.targets == state.targets and result.rating > 0
 

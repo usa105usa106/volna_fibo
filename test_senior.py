@@ -39,11 +39,11 @@ def test_complete4h_requires_exactly_four_closed_1h():
     assert out.iloc[0]["timestamp"] == pd.Timestamp("2026-01-01T00:00:00Z")
 
 
-def test_doge_fib_example_matches_migration_logic():
-    fibs = _fib_prices(0.07831, 0.10589)
-    assert abs(fibs["0.500"] - 0.09210) < 1e-8
-    assert abs(fibs["0.382"] - 0.09535444) < 1e-8
-    assert abs(fibs["0.236"] - 0.09938112) < 1e-8
+def test_doge_fib_example_uses_working_low_recovery():
+    fibs = _fib_prices(0.09113, 0.10589)
+    assert abs(fibs["R500"] - 0.09851) < 1e-8
+    assert abs(fibs["R382"] - 0.09676832) < 1e-8
+    assert abs(fibs["R236"] - 0.09461336) < 1e-8
 
 
 def test_nested_targets_match_doge_example():
@@ -663,7 +663,7 @@ def test_no_yahoo_commodity_proxy_remains_in_runtime_source():
 
 def test_version_0018_is_default():
     cfg = Settings(BOT_TOKEN="test")
-    assert cfg.bot_version == "0024"
+    assert cfg.bot_version == "0025"
     assert cfg.default_top_n == 100
 
 

@@ -41,6 +41,14 @@ class Repository:
                     FOREIGN KEY(session_id) REFERENCES search_sessions(id)
                 );
                 CREATE TABLE IF NOT EXISTS report_chats (chat_id INTEGER PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS major_counts (
+                    exchange TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    protocol TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    state_json TEXT NOT NULL,
+                    PRIMARY KEY(exchange,symbol,protocol)
+                );
                 """
             )
             await db.executemany("INSERT OR IGNORE INTO kv(key,value) VALUES(?,?)", self._settings_rows(self.defaults))
@@ -195,3 +203,40 @@ class Repository:
                     (json.dumps(state.to_dict(), ensure_ascii=False, allow_nan=False), int(state.is_control), session_id, state.symbol),
                 )
             await db.commit()
+
+    async def major_count(self, exchange: str, symbol: str, protocol: str) -> tuple[WaveState | None, int]:
+        async with (aiosqlite.connect(self.path) as db,
+                    db.execute("SELECT state_json,revision FROM major_counts WHERE exchange=? AND symbol=? AND protocol=?",
+                               (exchange, symbol, protocol)) as cur):
+            row = await cur.fetchone()
+        return (WaveState.from_dict(json.loads(row[0])), int(row[1])) if row else (None, 0)
+
+    async def save_major_count(self, state: WaveState, expected_revision: int) -> None:
+        """Independent safety ledger. Reset/search/Telegram cannot revive a retired count.
+
+        Optimistic locking prevents two service instances from overwriting a newer
+        invalidation with an older calculation. No tracked-session or timer mutation.
+        """
+        book = state.structure_evidence["major_count"]
+        payload = json.dumps(state.to_dict(), ensure_ascii=False, allow_nan=False)
+        key = (state.exchange, state.symbol, book["protocol"])
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                async with db.execute("SELECT state_json,revision FROM major_counts WHERE exchange=? AND symbol=? AND protocol=?", key) as cur:
+                    existing = await cur.fetchone()
+                if (int(existing[1]) if existing else 0) != expected_revision:
+                    raise RuntimeError("major count changed concurrently; retry from saved state")
+                if existing:
+                    prior = json.loads(existing[0])["structure_evidence"]["major_count"]
+                    if not set(prior["retired"]).issubset(book["retired"]):
+                        raise ValueError("retired major count cannot be restored")
+                    if book["observed_at"] < prior["observed_at"]:
+                        raise ValueError("stale major count write")
+                await db.execute("INSERT INTO major_counts(exchange,symbol,protocol,revision,state_json) VALUES(?,?,?,?,?) "
+                                 "ON CONFLICT(exchange,symbol,protocol) DO UPDATE SET revision=excluded.revision,state_json=excluded.state_json",
+                                 (*key, expected_revision+1, payload))
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise

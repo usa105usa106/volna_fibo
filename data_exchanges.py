@@ -36,6 +36,10 @@ def _candle_result(raw: pd.DataFrame, timeframe: str, end: datetime, *, is_contr
     raw = validate_candles(raw, IntegrityPolicy(timeframe, is_control, False, False), cutoff)
     step = pd.Timedelta(hours=1) if timeframe == "1h" else pd.Timedelta(days=1)
     closed = raw[(raw["timestamp"] + step) <= cutoff].copy()
+    # Preserve the validated OHLC envelope without breaking the existing tuple API.
+    last = raw.iloc[-1]
+    closed.attrs["live_candle"] = {"timestamp": last.timestamp.isoformat(),
+        **{key: float(last[key]) for key in ("open", "high", "low", "close", "volume")}}
     return closed, float(raw["close"].iloc[-1]), float(raw["low"].iloc[-1])
 
 

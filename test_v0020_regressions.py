@@ -101,6 +101,12 @@ def test_recorded_acceptance_survives_rolling_history_and_prevents_late_reanchor
         "open": 150., "high": 155., "low": [145.] * 4 + [120.] * 4,
         "close": 150., "volume": 1.,
     })
+    # v0025 reloads back to the working low for exact recovery counts. Missing
+    # history must not be replaced with a saved three-bar confirmation counter.
+    from data_integrity import DataIntegrityError
+    with pytest.raises(DataIntegrityError, match="history does not cover"):
+        SeniorWaveDetector().track(deepcopy(state), MarketSnapshot("SYNTHETIC", "binance_spot", 1., 150., None, h1, pd.DataFrame()), 300)
+    h1 = pd.concat([lifecycle_snapshot().hourly_closed.iloc[:8], h1], ignore_index=True)
     updated = SeniorWaveDetector().track(state, MarketSnapshot("SYNTHETIC", "binance_spot", 1., 150., None, h1, pd.DataFrame()), 300)
     assert updated.working_low == 130.
     assert "LOCKED" in updated.last_event

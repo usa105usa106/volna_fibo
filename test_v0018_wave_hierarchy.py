@@ -75,7 +75,7 @@ def test_nested_fresh_convex_setup_rates_like_a_premium_opportunity():
         retrace=(317.7 - 296.1) / (317.7 - 212.9),
         growth_pct=(311.09 / 296.1 - 1) * 100,
         strict_distance_pct=(296.1 / 212.9 - 1) * 100,
-        fib_status="> .236 · 3/3 C4H",
+        fib_status=">R.618 · 3 C4H",
         liquidity_rank=20,
         top_n=300,
         wave_type="W3-(2)",

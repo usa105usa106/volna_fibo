@@ -195,8 +195,8 @@ def test_legacy_saved_count_requires_same_symbol_recount():
 def test_three_of_three_recovery_never_scores_lower_than_two():
     args = dict(retrace=.7, growth_pct=2., strict_distance_pct=10., liquidity_rank=10,
                 top_n=300, wave_type="W3-(2)", t1_upside_pct=30.)
-    for level in ("236","382","500","618","705","786","886","950"):
-        scores = [_rating(**args,fib_status=f"> .{level} · {n}/3 C4H") for n in (1,2,3)]
+    for level in ("236","382","500","618","705","786","886"):
+        scores = [_rating(**args,fib_status=f">R.{level} · {n} C4H") for n in (1,2,3,7)]
         assert scores == sorted(scores), (level, scores)
 
 
@@ -204,7 +204,7 @@ def test_new_low_cannot_inherit_old_three_bar_confirmation():
     h4 = complete4h(lifecycle_snapshot().hourly_closed)
     text, holds = _recovery(h4, _fib_prices(100.,200.), h4.timestamp.iloc[-1])
     assert holds == 1
-    assert "1/3 C4H" in text
+    assert "1 C4H" in text
 
 
 def test_conflicting_hourly_duplicates_cannot_be_aggregated_into_a_senior_bar():
@@ -229,6 +229,6 @@ def test_hit_targets_are_persisted_and_not_recycled_after_retreat():
 def test_equal_displayed_rating_uses_freshness_then_confirmation_then_liquidity():
     states = []
     for symbol,growth,holds,rank in [("OLD",9.,3,1),("WEAK",2.,1,1),("THIN",2.,3,200),("BEST",2.,3,1)]:
-        s = prior();s.symbol=symbol;s.rating=8.8;s.growth_from_low_pct=growth;s.fib_status=f"> .500 · {holds}/3 C4H";s.liquidity_rank=rank
+        s = prior();s.symbol=symbol;s.rating=8.8;s.growth_from_low_pct=growth;s.fib_status=f">R.500 · {holds} C4H";s.liquidity_rank=rank
         states.append(s)
     assert [s.symbol for s in select_top_crypto(states)] == ["BEST","THIN","WEAK","OLD"]

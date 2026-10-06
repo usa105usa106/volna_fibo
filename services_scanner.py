@@ -11,6 +11,8 @@ import pandas as pd
 
 from config import Settings
 from core_models import MarketSnapshot, WaveState
+from core_majors import MajorWaveEngine, is_major
+from core_major_rules import PROTOCOL, KNOWN_AT
 from core_ranking import select_top_crypto
 from core_senior import SeniorWaveDetector, control_no_setup, data_incomplete_state, no_setup_state
 from core_symbols import CONTROL_BASES, WALK_MAJOR_BASES, display_symbol, excluded_from_crypto_top, normalize_symbol
@@ -18,7 +20,7 @@ from data_collector import MarketDataService
 from data_exchanges import ControlUnavailable
 from data_integrity import DataIntegrityError
 from db_repository import Repository
-from services_tasks import gather_owned, run_cpu
+from services_tasks import gather_owned, run_cpu, _drain_owned
 
 
 log = logging.getLogger(__name__)
@@ -41,6 +43,7 @@ class RunResult:
     skipped_controls: list[str] = field(default_factory=list)
     successful_crypto_snapshots: int = 0
     analysis_seconds: float = 0.0
+    major_context: list[WaveState] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -143,6 +146,7 @@ class ScannerService:
         self.repo = repo
         self.data = data
         self.detector = SeniorWaveDetector()
+        self.majors = MajorWaveEngine()
         self.lock = asyncio.Lock()
         self._workers = asyncio.Semaphore(cfg.http_concurrency)
         self._cpu = asyncio.Semaphore(1)
@@ -150,6 +154,25 @@ class ScannerService:
     async def _compute(self, call, *args):
         async with self._cpu:
             return await run_cpu(call, *args)
+
+    async def _analyze(self, snap, rank, top_n, previous=None):
+        if not is_major(snap.symbol):
+            return await self._compute(self.detector.track, previous, snap, top_n) if previous else await self._compute(self.detector.detect, snap, rank, top_n)
+        saved, revision = await self.repo.major_count(snap.exchange, snap.symbol, PROTOCOL)
+        async def calculate_and_store():
+            result = await self._compute(self.majors.evaluate, snap, saved, rank, top_n)
+            if result.status != "DATA_INCOMPLETE":
+                await self.repo.save_major_count(result, revision)
+            return result
+        # Once validated market data are handed to the safety state machine,
+        # Reset/cancellation drains its bounded calculation AND atomic write.
+        # A fleeting observed hard-invalid wick must not disappear with a task.
+        task = asyncio.create_task(calculate_and_store())
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await _drain_owned(asyncio.gather(task, return_exceptions=True))
+            raise
 
     async def _map(self, call, values):
         async def bounded(value):
@@ -186,6 +209,7 @@ class ScannerService:
             errors: list[str] = []
             found: list[WaveState] = []
             successful_snapshots = 0
+            major_context: list[WaveState] = []
             success_lock = asyncio.Lock()
 
             rank_map = {symbol: idx + 1 for idx, (symbol, _) in enumerate(universe)}
@@ -195,7 +219,9 @@ class ScannerService:
                 nonlocal successful_snapshots
                 try:
                     snap = await self.data.snapshot(exchange, symbol, qv_map.get(symbol, 0.0))
-                    state = await self._compute(self.detector.detect, snap, rank_map.get(symbol), top_n)
+                    state = await self._analyze(snap, rank_map.get(symbol), top_n)
+                    if state and is_major(symbol):
+                        major_context.append(state)
                     if state and state.status == "DATA_INCOMPLETE":
                         errors.append(f"{symbol}: DATA_INCOMPLETE · {state.last_event}")
                         return None
@@ -270,6 +296,7 @@ class ScannerService:
                 skipped_controls=skipped_controls,
                 successful_crypto_snapshots=successful_snapshots,
                 analysis_seconds=time.perf_counter() - started_perf,
+                major_context=major_context,
             )
 
     async def commit_search(self, result: RunResult, completed_at: str | None = None) -> int:
@@ -303,13 +330,24 @@ class ScannerService:
                 """
                 try:
                     snap = await self.data.snapshot(exchange, state.symbol, 0.0)
+                    if state.working_low_ts and not snap.hourly_closed.empty:
+                        low_at = pd.Timestamp(state.working_low_ts)
+                        low_at = low_at.tz_localize("UTC") if low_at.tzinfo is None else low_at.tz_convert("UTC")
+                        if pd.to_datetime(snap.hourly_closed["timestamp"], utc=True).min() > low_at:
+                            # An exact recovery streak cannot be reconstructed from
+                            # a truncated rolling window or a saved v0024 counter.
+                            # Download this same market back to the frozen low.
+                            h1_days = max(self.cfg.lookback_1h_days,
+                                math.ceil((pd.Timestamp.now(tz="UTC") - low_at).total_seconds() / 86400) + 1)
+                            snap = await self.data.walk_history(exchange, state.symbol, 0.0,
+                                h1_days=h1_days, d1_days=self.cfg.lookback_1d_days)
                     if state.last_complete4h_bucket:
                         since = pd.Timestamp(state.last_complete4h_bucket) + pd.Timedelta(hours=4)
                         if since.tzinfo is None:
                             since = since.tz_localize("UTC")
                         if snap.hourly_closed.empty or pd.to_datetime(snap.hourly_closed["timestamp"], utc=True).min() > since:
                             raise DataIntegrityError("tracking history does not cover the last confirmed state")
-                    updated = await self._compute(self.detector.track, state, snap, top_n)
+                    updated = await self._analyze(snap, state.liquidity_rank, top_n, state)
                     if updated.status == "DATA_INCOMPLETE":
                         errors.append(f"{state.symbol}: DATA_INCOMPLETE · {updated.last_event}")
                         return updated, None
@@ -361,7 +399,7 @@ class ScannerService:
             )
 
     async def analyze_symbols(self, raw_symbols: list[str]) -> RunResult:
-        """One-off fresh analysis of exactly the user-supplied symbols. No state mutation."""
+        """One-off analysis; tracking unchanged. BTC/ETH safety ledger is durable."""
         async with self.lock:
             started_perf = time.perf_counter()
             settings = await self.repo.get_settings()
@@ -396,7 +434,7 @@ class ScannerService:
                 try:
                     snap = await self.data.snapshot(exchange, symbol, qv_map.get(symbol, 0.0))
                     rank = None if is_control else rank_map.get(symbol, top_n + 1)
-                    state = await self._compute(self.detector.detect, snap, rank, top_n)
+                    state = await self._analyze(snap, rank, top_n)
                     if state:
                         state.is_control = is_control
                         return state
@@ -564,6 +602,8 @@ class ScannerService:
                     # key -> fresh record index, or None when first qualifying observation
                     # was already extended and intentionally excluded.
                     seen: dict[str, int | None] = {}
+                    private_major_state = None
+                    private_major_engine = MajorWaveEngine()
 
                     for checkpoint in checkpoints:
                         h1_hist = h1_all[(h1_all["timestamp"] + pd.Timedelta(hours=1)) <= checkpoint].copy()
@@ -581,13 +621,19 @@ class ScannerService:
                             quote_volume=qv_map.get(symbol, 0.0),
                             live_price=float(h1_hist["close"].iloc[-1]),
                             live_low=float(h1_hist["low"].iloc[-1]),
-                            hourly_closed=h1_hist.tail(self.cfg.lookback_1h_days * 24 + 48).copy(),
-                            daily_closed=d1_hist.tail(self.cfg.lookback_1d_days + 5).copy(),
+                            hourly_closed=h1_hist.copy() if is_major(symbol) else h1_hist.tail(self.cfg.lookback_1h_days * 24 + 48).copy(),
+                            daily_closed=d1_hist.copy() if is_major(symbol) else d1_hist.tail(self.cfg.lookback_1d_days + 5).copy(),
                             daily_context=context_hist,
                             history_evidence=dict(full.history_evidence),
+                            observed_at=checkpoint.isoformat(),
                         )
                         rank = rank_map.get(symbol, diagnostic_top_n + 1)
-                        state = self.detector.detect(snap, rank, diagnostic_top_n)
+                        if is_major(symbol) and checkpoint >= KNOWN_AT:
+                            state = private_major_engine.evaluate(snap, private_major_state, rank, diagnostic_top_n)
+                            if state.status != "DATA_INCOMPLETE":
+                                private_major_state = state
+                        else:
+                            state = self.detector.detect(snap, rank, diagnostic_top_n)
                         if state is None or (state.rating or 0.0) < self.cfg.min_rating:
                             continue
                         if state.wave_type not in {"W2", "W3-(2)"}:

@@ -11,6 +11,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 from core_models import WaveState
+from core_recovery import parse_recovery_status
 from core_ranking import ranking_key
 from core_symbols import display_symbol
 
@@ -89,11 +90,16 @@ def _targets(state: WaveState) -> str:
         return "—"
     if state.status == "PHASE_UNCERTAIN":
         return "после проверки стадии"
+    major = state.structure_evidence.get("major_count")
+    if major and major.get("primary") == "V1":
+        return "W3-(5) limit: " + _fmt(major.get("box", {}).get("upper"))
     if state.targets:
         remaining = [(i, x) for i, x in enumerate(state.targets[:4], 1) if i not in state.targets_hit]
         if not remaining:
             return f"T1–T{len(state.targets)} достигнуты"
         result = " / ".join((f"T{i}: " if state.targets_hit else "") + _fmt(x) for i, x in remaining)
+        if major:
+            return ("senior W3: " if major.get("primary") == "V3" else "W3-(3): ") + result
         return "W5: " + result if state.wave_type in {"W4", "W5"} else result
     return "—"
 
@@ -113,16 +119,9 @@ def _inside_zone(price: float | None, zone: tuple[float, float] | None) -> bool:
 
 
 def _confirmed_recovery_ratio(fib_status: str) -> float | None:
-    """Return reclaimed Fib ratio only for durable 3/3 COMPLETE4H acceptance."""
-    if "3/3 C4H" not in (fib_status or ""):
-        return None
-    match = re.search(r">\s*\.(\d+)", fib_status)
-    if not match:
-        return None
-    try:
-        return float(f"0.{match.group(1)}")
-    except ValueError:
-        return None
+    """Three or more consecutive COMPLETE4H closes, with no counter cap."""
+    ratio, count = parse_recovery_status(fib_status)
+    return ratio if count >= 3 else None
 
 
 def _row_values_flags(state: WaveState, rank: int | None) -> tuple[list[str], list[bool]]:
@@ -139,7 +138,7 @@ def _row_values_flags(state: WaveState, rank: int | None) -> tuple[list[str], li
         and 0 <= state.growth_from_low_pct <= 3.0
     )
     recovery_ratio = _confirmed_recovery_ratio(state.fib_status)
-    fib_strong = not invalid and recovery_ratio is not None and recovery_ratio <= 0.500
+    fib_strong = not invalid and recovery_ratio is not None and recovery_ratio >= 0.500
     base_actionable = not invalid and _inside_zone(state.current_price, state.base_zone)
     deep_actionable = not invalid and _inside_zone(state.current_price, state.deep_zone)
     target_strong = False
@@ -168,6 +167,13 @@ def _row_values_flags(state: WaveState, rank: int | None) -> tuple[list[str], li
         if history.get("predecessor") and history.get("current"):
             wave += f" · {display_symbol(history['predecessor'])}→{display_symbol(history['current'])}"
     low = _fmt(state.working_low)
+    major = state.structure_evidence.get("major_count")
+    if major and not invalid:
+        wave = (f"{major.get('primary')} · " if major['base'] == 'BTC' else '') + state.wave_type
+        if major.get('unresolved'):
+            wave += " · V2/V3 unresolved"
+        elif state.wave_type == "W3-(2)":
+            wave += " → W3-(3)?"
     if not invalid and state.working_low is not None and state.retrace_depth is not None and math.isfinite(state.retrace_depth):
         low += f" · {state.retrace_depth * 100:.2f}%"
     values = [
@@ -190,7 +196,7 @@ def _row_values_flags(state: WaveState, rank: int | None) -> tuple[list[str], li
         False,              # raw price is information, not a favorable signal by itself
         False,              # W2/W3-(2) label alone is not enough for emphasis
         False,              # working low alone is not enough for emphasis
-        fib_strong,         # durable 3/3 C4H reclaim of .500 or stronger (.382/.236)
+        fib_strong,         # >=3 consecutive C4H above R.500 or a higher recovery
         very_fresh,         # <= 3% from working low
         base_actionable,    # actually trading inside base zone
         deep_actionable,    # actually trading inside deep/on-sweep zone
@@ -498,6 +504,7 @@ def render_table_png(
 # ---------- .txt technical report ----------
 
 def _state_technical_lines(state: WaveState, rank: int | None) -> list[str]:
+    from services_major_formatter import major_count_text
     values, _ = _row_values_flags(state, rank)
     fibs = ", ".join(f"{key}={_fmt(value)}" for key, value in state.fibs.items()) or "—"
     return [
@@ -519,6 +526,7 @@ def _state_technical_lines(state: WaveState, rank: int | None) -> list[str]:
         f"  structure_evidence: {json.dumps(state.structure_evidence, ensure_ascii=False, sort_keys=True)}",
         f"  last_complete4h={state.last_complete4h_bucket or '—'}; close={_fmt(state.last_complete4h_close)}",
         f"  timestamps: impulse_start={state.impulse_start_ts or '—'}; impulse_high={state.impulse_high_ts or '—'}; working_low={state.working_low_ts or '—'}",
+        *([major_count_text(state)] if state.structure_evidence.get("major_count") else []),
     ]
 
 

@@ -4,16 +4,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import pairwise
 import math
-from typing import Iterable
 
 import pandas as pd
 
 from core_models import MarketSnapshot, WaveState
+from core_recovery import SEMANTICS, recovery_prices, recovery_status, parse_recovery_status
 from core_symbols import CONTROL_BASES
 from data_integrity import DataIntegrityError
 
 
-FIB_RATIOS = (0.236, 0.382, 0.500, 0.618, 0.705, 0.786, 0.886, 0.950)
 TARGET_MULTIPLIERS = (1.0, 1.618, 2.618, 4.236)
 # W5 is a separate scenario: relationships to W1 of the SAME outer degree.
 # W2/W3-(2) projection multipliers above remain unchanged.
@@ -114,31 +113,9 @@ def _iso(ts: pd.Timestamp | datetime | str | None) -> str | None:
     return pd.Timestamp(ts).tz_convert("UTC").isoformat() if pd.Timestamp(ts).tzinfo else pd.Timestamp(ts, tz="UTC").isoformat()
 
 
-def _fib_prices(origin: float, high: float) -> dict[str, float]:
-    length = high - origin
-    return {f"{r:.3f}": high - r * length for r in FIB_RATIOS}
-
-
-def _fib_status(close: float, fibs: dict[str, float], recent_closes: Iterable[float]) -> tuple[str, int]:
-    # Recovery is evaluated on COMPLETE4H closes, not live price.
-    recent = list(recent_closes)[-3:]
-    thresholds = [
-        (0.236, fibs["0.236"]),
-        (0.382, fibs["0.382"]),
-        (0.500, fibs["0.500"]),
-        (0.618, fibs["0.618"]),
-        (0.705, fibs["0.705"]),
-        (0.786, fibs["0.786"]),
-        (0.886, fibs["0.886"]),
-        (0.950, fibs["0.950"]),
-    ]
-    for ratio, level in thresholds:
-        if close >= level:
-            holds = sum(1 for c in recent if c >= level)
-            suffix = f" · {holds}/3 C4H" if recent else ""
-            ratio_text = f"{ratio:.3f}".split(".")[1]
-            return f"> .{ratio_text}{suffix}", holds
-    return "< .950", 0
+def _fib_prices(working_low: float, high: float) -> dict[str, float]:
+    """Recovery L->H; original impulse depth is stored separately in retrace_depth."""
+    return recovery_prices(working_low, high)
 
 
 def _zones(working_low: float, high: float, strict_origin: float) -> tuple[tuple[float, float], tuple[float, float]]:
@@ -185,10 +162,7 @@ def _origin_bucket(h4: pd.DataFrame, day, price: float):
 
 
 def _recovery(h4: pd.DataFrame, fibs: dict[str, float], low_ts) -> tuple[str, int]:
-    # A new working low resets the confirmation window. Earlier closes belong to
-    # the old correction and must not manufacture 3/3 acceptance for a fresh low.
-    rows = h4 if low_ts is None else h4[h4["timestamp"] >= _utc(low_ts)]
-    return _fib_status(float(h4["close"].iloc[-1]), fibs, rows["close"].tail(3))
+    return recovery_status(h4, fibs, low_ts)
 
 
 def _reached_targets(snapshot: MarketSnapshot, low_ts, targets: list[float]) -> list[int]:
@@ -350,18 +324,15 @@ def _rating(
     elif growth_pct <= 20:
         score += 0.2
 
-    # Recovery quality on COMPLETE4H.  The level matters, but persistence matters
-    # too: 3/3 C4H is stronger than a one-bucket reclaim.
-    recovery = 0.0
-    for marker, value in (("> .236", 1.6), ("> .382", 1.45), ("> .500", 1.2),
-                          ("> .5", 1.2), ("> .618", 0.9), ("> .705", 0.65),
-                          ("> .786", 0.55), ("> .886", 0.35), ("> .950", 0.2)):
-        if marker in fib_status:
-            recovery = value
-            break
-    if "3/3 C4H" in fib_status:
+    # Recovery ratios now INCREASE as price recovers from the working low.
+    # Preserve the existing score range and persistence weights, but no longer
+    # reward a deeply corrected, unrecovered price as a strong reclaim.
+    ratio, holds = parse_recovery_status(fib_status)
+    recovery = {0.236: 0.35, 0.382: 0.9, 0.500: 1.2, 0.618: 1.45,
+                0.705: 1.6, 0.786: 1.6, 0.886: 1.6}.get(ratio, 0.0)
+    if holds >= 3:
         recovery += 0.15
-    elif "1/3 C4H" in fib_status:
+    elif holds == 1:
         recovery -= 0.15
     score += max(0.0, recovery)
 
@@ -408,16 +379,15 @@ def _rating(
     # This is intentionally a cap (not a bonus): it preserves convexity information
     # while stopping weak-recovery structures from outranking cleaner setups.
     if wave_type == "W3-(2)" and liquidity_rank is not None:
-        if "1/3 C4H" in fib_status:
+        if holds == 1:
             score = min(score, 8.5)
-        elif "2/3 C4H" in fib_status:
+        elif holds == 2:
             score = min(score, 8.8)
-        elif "3/3 C4H" in fib_status:
-            if "> .500" in fib_status or "> .5" in fib_status:
-                score = min(score, 8.9)
+        elif holds >= 3 and ratio == 0.500:
+            score = min(score, 8.9)
         # Weak-level cap applies at EVERY persistence count. Otherwise a stronger
         # third close reduced the score from 8.8 to 8.4 (non-monotone recovery).
-        if any(marker in fib_status for marker in ("> .618", "> .705", "> .786", "> .886", "> .950")):
+        if ratio is None or ratio < 0.500:
             score = min(score, 8.4)
 
     return round(max(0.0, min(10.0, score)), 1)
@@ -426,9 +396,10 @@ def _rating(
 def _status_from_state(growth_pct: float, fib_status: str) -> str:
     if growth_pct > 30:
         return "EXTENDED"
-    if "> .382" in fib_status or "> .236" in fib_status:
+    _, holds = parse_recovery_status(fib_status)
+    if holds >= 3:
         return "CONFIRMED"
-    if "> .618" in fib_status or "> .500" in fib_status or "> .5" in fib_status:
+    if holds:
         return "RECOVERING"
     return "DEEP"
 
@@ -1370,7 +1341,7 @@ class SeniorWaveDetector:
         if working_low <= strict_origin:
             return None
 
-        fibs = _fib_prices(origin, impulse_high)
+        fibs = _fib_prices(working_low, impulse_high)
         last_close = float(h4["close"].iloc[-1])
         status, _ = _recovery(h4, fibs, working_low_ts)
         growth = (live / working_low - 1) * 100 if working_low else math.nan
@@ -1425,7 +1396,7 @@ class SeniorWaveDetector:
             target_impulse_length=target_length,
             target_source=target_source,
             targets_hit=targets_hit,
-            structure_evidence={"projection_accepted_at": accepted_at},
+            structure_evidence={"projection_accepted_at": accepted_at, "fib_semantics": SEMANTICS},
             base_zone=base,
             deep_zone=deep,
             current_price=live,
@@ -1533,8 +1504,9 @@ class SeniorWaveDetector:
         evidence["phase"] = "W5_SCENARIO" if accepted_at else "W4_SCENARIO"
         previous.strict_origin = low if accepted_at else w1_high
         previous.retrace_depth = (high - low) / (high - origin)
-        previous.fibs = _fib_prices(origin, high)
+        previous.fibs = _fib_prices(low, high)
         previous.fib_status, _ = _recovery(h4, previous.fibs, previous.working_low_ts)
+        previous.structure_evidence["fib_semantics"] = SEMANTICS
         previous.last_complete4h_bucket = _iso(h4["timestamp"].iloc[-1])
         previous.last_complete4h_close = float(h4["close"].iloc[-1])
         previous.current_price = snapshot.live_price or previous.last_complete4h_close
@@ -1739,10 +1711,11 @@ class SeniorWaveDetector:
 
         length = high - origin
         previous.retrace_depth = (high - previous.working_low) / length if length > 0 else None
-        previous.fibs = _fib_prices(origin, high)
+        previous.fibs = _fib_prices(previous.working_low, high)
         last_close = float(h4["close"].iloc[-1])
         fib_status, _ = _recovery(h4, previous.fibs, previous.working_low_ts)
         previous.fib_status = fib_status
+        previous.structure_evidence["fib_semantics"] = SEMANTICS
         previous.last_complete4h_close = last_close
         previous.last_complete4h_bucket = _iso(h4["timestamp"].iloc[-1])
         previous.current_price = snapshot.live_price or last_close

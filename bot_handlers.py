@@ -30,6 +30,7 @@ from services_formatter import (
     telegram_table_messages,
 )
 from services_scanner import RunResult, ScannerService, WalkForwardResult
+from services_major_formatter import major_count_text
 from services_scheduler import DynamicScheduler
 from services_runtime import cleanup_runtime_files
 
@@ -509,6 +510,11 @@ class BotController:
         title, subtitle, crypto_label = self._report_titles(result)
         short_summary = self._short_summary(result)
         technical = self._technical_txt(result, title, subtitle)
+        majors = {s.symbol: s for s in [*result.major_context, *result.states]
+                  if s.structure_evidence.get("major_count")}
+        extra_major = [s for s in result.major_context if s.symbol not in {x.symbol for x in result.states}]
+        for s in extra_major:
+            technical += "\nBTC/ETH CONTEXT — OUTSIDE W2/W3-(2) TOP-10\n" + major_count_text(s) + "\n"
         stamp = datetime.now(ZoneInfo(self.cfg.bot_timezone)).strftime("%Y%m%d_%H%M%S")
         txt_name = safe_report_filename(result.mode, stamp)
 
@@ -549,6 +555,9 @@ class BotController:
                     caption=short_summary,
                     reply_markup=await self._kbd(),
                 )
+                for state in majors.values():
+                    for text in split_plain(major_count_text(state)):
+                        await self._send_message(cid, text, parse_mode=None)
                 complete_chats += 1
             except TelegramForbiddenError:
                 log.warning("Removing unreachable report chat %s", cid)
@@ -690,6 +699,7 @@ class BotController:
             "6) MFE/MAE_to_resolution считаются только до первого T1/strict invalidation (или до конца горизонта, если unresolved).",
             "7) MFE/MAE_30d отдельно показывают всё последующее движение за полный горизонт и не смешиваются с риском пути до исхода.",
             "8) /walk не меняет Search, Сопровождение, tracked-set или их таймер.",
+            "9) BTC/ETH reference-сценарии v0025 известны с 2026-10-05 21:07 UTC. До этой даты /walk использует общий детектор; новые якоря не выдаются за исторически известные. После — отдельное состояние в памяти, без записи в БД.",
         ])
         return "\n".join(lines).rstrip() + "\n"
 

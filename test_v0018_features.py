@@ -39,7 +39,7 @@ def sample_state(symbol="DOGSUSDT", rating=9.1, control=False):
 
 
 def test_v0018_version_is_default():
-    assert Settings(BOT_TOKEN="test", _env_file=None).bot_version == "0024"
+    assert Settings(BOT_TOKEN="test", _env_file=None).bot_version == "0025"
 
 
 def test_commodity_duplicates_are_excluded_from_crypto_top():
@@ -91,7 +91,7 @@ def test_runtime_declares_pillow_and_dejavu_font():
     assert "Pillow==12.3.0" in requirements
     assert "Pillow==12.3.0" in lock
     assert "fonts-dejavu-core" in docker
-    assert 'org.opencontainers.image.version="0024"' in docker
+    assert 'org.opencontainers.image.version="0025"' in docker
 
 
 def test_v0018_highlighting_is_sparse_and_only_marks_strong_properties():
@@ -112,7 +112,7 @@ def test_v0018_highlighting_is_sparse_and_only_marks_strong_properties():
 
     confirmed = sample_state(rating=8.1)
     confirmed.growth_from_low_pct = 4.0
-    confirmed.fib_status = "> .500 · 3/3 C4H"
+    confirmed.fib_status = ">R.500 · 3 C4H"
     confirmed.targets = [confirmed.current_price * 1.20]
     _, confirmed_flags = _row_values_flags(confirmed, 1)
     assert confirmed_flags[6] is True

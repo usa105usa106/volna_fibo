@@ -82,7 +82,7 @@ def test_bch_reference_rating_is_not_artificially_9x():
         retrace=retrace,
         growth_pct=(310.10 / 296.10 - 1.0) * 100.0,
         strict_distance_pct=(296.10 / 212.90 - 1.0) * 100.0,
-        fib_status="> .382 · 2/3 C4H",
+        fib_status=">R.618 · 2 C4H",
         liquidity_rank=52,
         top_n=300,
         wave_type="W3-(2)",

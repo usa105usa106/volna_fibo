@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 
-WaveType = Literal["W2", "W3-(2)", "W4", "W5", "CONTROL", "NONE"]
+WaveType = Literal["W2", "W3-(2)", "W3-(3)", "W3-(5)", "W4", "W5", "CONTROL", "NONE"]
 WaveStatus = Literal[
     "FORMING",
     "DEEP",
@@ -99,6 +99,9 @@ class MarketSnapshot:
     # It is ancestry evidence only; active anchors still come from current H4.
     daily_context: Any = None
     history_evidence: dict[str, Any] = field(default_factory=dict)
+    live_candle: dict[str, Any] | None = None
+    observed_at: str | None = None
+    cross_asset: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

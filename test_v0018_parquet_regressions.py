@@ -142,7 +142,7 @@ def test_parquet_reference_rating_caps_match_bch_and_gram():
         retrace=(317.70 - 296.10) / (317.70 - 212.90),
         growth_pct=(310.10 / 296.10 - 1.0) * 100.0,
         strict_distance_pct=(296.10 / 212.90 - 1.0) * 100.0,
-        fib_status="> .382 · 2/3 C4H",
+        fib_status=">R.618 · 2 C4H",
         liquidity_rank=52,
         top_n=300,
         wave_type="W3-(2)",
@@ -152,14 +152,15 @@ def test_parquet_reference_rating_caps_match_bch_and_gram():
         retrace=(1.740 - 1.460) / (1.740 - 1.286),
         growth_pct=(1.489 / 1.460 - 1.0) * 100.0,
         strict_distance_pct=(1.460 / 1.286 - 1.0) * 100.0,
-        fib_status="> .618 · 3/3 C4H",
+        fib_status="<R.236 · 0 C4H",
         liquidity_rank=100,
         top_n=300,
         wave_type="W3-(2)",
         t1_upside_pct=(1.914 / 1.489 - 1.0) * 100.0,
     )
     assert bch == 8.8
-    assert gram == 8.4
+    # 1.489 is below R236 from 1.460 to 1.740: no recovery bonus at all.
+    assert gram == 8.1
 
 
 def test_usoil_reference_uses_current_nested_impulse_not_old_global_w1():
