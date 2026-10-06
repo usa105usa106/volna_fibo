@@ -1,6 +1,6 @@
 """Offline reconstruction of the dated BTC/ETH hypotheses, NOT a historical signal test.
 
-python replay_majors.py --output audit/v0025/majors-reconstruction
+python replay_majors.py --output audit/v0026/majors-reconstruction
 Uses the checked, same-exchange Binance parquet fixtures; no live I/O or SQLite.
 """
 
@@ -55,7 +55,7 @@ def main():
         raise RuntimeError("; ".join(failures))
     args.output.mkdir(parents=True, exist_ok=True)
     provenance = {
-        "version": "0025",
+        "version": "0026",
         "market": "binance_spot",
         "protocol_known_at": str(KNOWN_AT),
         "snapshot": snapshots["BTC"].observed_at,
@@ -77,7 +77,7 @@ def main():
         technical_report_text(
             states,
             heading=[
-                "v0025 BTC/ETH — RETROSPECTIVE STRUCTURAL RECONSTRUCTION",
+                "v0026 BTC/ETH — RETROSPECTIVE STRUCTURAL RECONSTRUCTION",
                 f"Snapshot {provenance['snapshot']}; protocol published {KNOWN_AT}",
                 provenance["warning"],
             ],
@@ -88,10 +88,10 @@ def main():
     (args.output / "table.png").write_bytes(
         render_table_png(
             states,
-            title="BTC / ETH · v0025",
+            title="BTC / ETH · v0026",
             subtitle=f"Binance Spot · historical reconstruction · {provenance['snapshot']}",
             crypto_label="DATED SCENARIOS · NOT A LIVE REPORT",
-            version="0025",
+            version="0026",
         )
     )
     print(

@@ -510,8 +510,6 @@ class BotController:
         title, subtitle, crypto_label = self._report_titles(result)
         short_summary = self._short_summary(result)
         technical = self._technical_txt(result, title, subtitle)
-        majors = {s.symbol: s for s in [*result.major_context, *result.states]
-                  if s.structure_evidence.get("major_count")}
         extra_major = [s for s in result.major_context if s.symbol not in {x.symbol for x in result.states}]
         for s in extra_major:
             technical += "\nBTC/ETH CONTEXT — OUTSIDE W2/W3-(2) TOP-10\n" + major_count_text(s) + "\n"
@@ -555,9 +553,6 @@ class BotController:
                     caption=short_summary,
                     reply_markup=await self._kbd(),
                 )
-                for state in majors.values():
-                    for text in split_plain(major_count_text(state)):
-                        await self._send_message(cid, text, parse_mode=None)
                 complete_chats += 1
             except TelegramForbiddenError:
                 log.warning("Removing unreachable report chat %s", cid)

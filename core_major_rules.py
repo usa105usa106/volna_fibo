@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import math
 from decimal import Decimal
 from itertools import pairwise
 
+import numpy as np
 import pandas as pd
 
 from core_recovery import recovery_prices
@@ -178,93 +180,161 @@ def impulse_errors(points: list[dict], frame: pd.DataFrame | None = None) -> lis
 
 
 def clean_five(frame: pd.DataFrame, start: dict, end: dict) -> dict:
-    """Use existing centered structural pivot masks at multiple meaningful scales.
+    """Find five meaningful legs inside a hierarchy, not an exact-length zigzag.
 
-    Retain alternating swings using an ATR/displacement floor. Never manufacture
-    extra vertices to reach six. An unproved subdivision is UNKNOWN, not invalid.
+    Vertices must be existing centered pivots. Every segment must contain ALL
+    its candle extrema; ignored interior pivots stay lower-degree swings, never
+    hidden origin/overlap violations. This function only supplies BTC V2 evidence.
     """
+    diagnostics = {"method": "structural-envelope-five-v0026"}
+
+    def unknown(reason):
+        return {"status": "UNPROVEN", "reason": reason, "points": [], **diagnostics}
+
+    if frame.empty or start["market"] != end["market"]:
+        return unknown("missing or mixed-market subdivision history")
+    timeframe = (
+        "1H"
+        if frame.timestamp.diff().dropna().min() == pd.Timedelta(hours=1)
+        else "COMPLETE4H"
+    )
+    endpoints = []
+    for anchor in (start, end):
+        stamp = pd.Timestamp(anchor["timestamp"])
+        # C4H timestamps label buckets, not the exact hour of their extreme.
+        # Resolve H1 support within that SAME exchange bucket; do not move the
+        # stored senior anchor or copy the bucket price to an unrelated H1 bar.
+        width = (
+            4 if timeframe == "1H" and anchor.get("timeframe") == "COMPLETE4H" else 1
+        )
+        rows = frame[
+            (frame.timestamp >= stamp)
+            & (frame.timestamp < stamp + pd.Timedelta(hours=width))
+        ]
+        matches = rows[
+            np.isclose(rows[anchor["kind"]], anchor["price"], rtol=1e-10, atol=0)
+        ]
+        if matches.empty:
+            return unknown("subdivision endpoint not present in its candle bucket")
+        p = point(matches.iloc[0], anchor["kind"], anchor["market"])
+        p["timeframe"] = timeframe
+        endpoints.append(p)
+    start, end = endpoints
+    if start["timestamp"] >= end["timestamp"] or start["price"] >= end["price"]:
+        return unknown("invalid subdivision endpoint chronology or displacement")
     span = frame[
         frame.timestamp.between(
             pd.Timestamp(start["timestamp"]), pd.Timestamp(end["timestamp"])
         )
-    ]
+    ].reset_index(drop=True)
     if len(span) < 20:
-        return {
-            "status": "UNPROVEN",
-            "reason": "insufficient subdivision history",
-            "points": [],
-        }
+        return unknown("insufficient subdivision history")
     length = end["price"] - start["price"]
     atr = float(_atr(span).dropna().median())
-    timeframe = (
-        "1H"
-        if span.timestamp.diff().dropna().min() == pd.Timedelta(hours=1)
-        else "COMPLETE4H"
-    )
+    if not math.isfinite(atr):
+        return unknown("ATR unavailable")
+    floor = max(length * 0.06, atr * 1.5)  # unchanged minimum significance
+    diagnostics.update(floor=floor, atr=atr, subdivision_timeframe=timeframe)
     peaks = _pivot_mask(span.high, 3, "high").fillna(False)
     troughs = _pivot_mask(span.low, 3, "low").fillna(False)
-    best = None
-    for fraction in (0.06, 0.08, 0.10, 0.12, 0.16, 0.20):
-        floor = max(length * fraction, atr * 1.5)
-        turns = [dict(start)]
-        for idx, row in span.iterrows():
-            if pd.Timestamp(row.timestamp) <= pd.Timestamp(
-                start["timestamp"]
-            ) or pd.Timestamp(row.timestamp) >= pd.Timestamp(end["timestamp"]):
+    nodes = [(0, start)]
+    for idx, row in span.iloc[1:-1].iterrows():
+        if bool(peaks.loc[idx]) == bool(troughs.loc[idx]):
+            continue  # No pivot, or an outside bar whose two pivots cannot be ordered.
+        p = point(row, "high" if peaks.loc[idx] else "low", start["market"])
+        p["timeframe"] = timeframe
+        nodes.append((idx, p))
+    nodes.append((len(span) - 1, end))
+    diagnostics["pivot_count"] = len(nodes)
+
+    # A directed acyclic graph of possible legs. Precomputed range extrema avoid
+    # repeatedly slicing pandas inside the bounded five-leg search.
+    lows, highs = span.low.to_numpy(float), span.high.to_numpy(float)
+    stamps = [pd.Timestamp(p["timestamp"]) for _, p in nodes]
+    edges = {i: [] for i in range(len(nodes))}
+    for i, (left, p) in enumerate(nodes[:-1]):
+        min_low = np.minimum.accumulate(lows[left + 1 :])
+        max_high = np.maximum.accumulate(highs[left + 1 :])
+        for j in range(i + 1, len(nodes)):
+            right, q = nodes[j]
+            if (
+                p["kind"] == q["kind"]
+                or (stamps[j] - stamps[i]).total_seconds() < 12 * 3600
+            ):
                 continue
-            kinds = [
-                k for k, mask in (("high", peaks), ("low", troughs)) if mask.loc[idx]
+            bottom, top = (
+                (p["price"], q["price"])
+                if p["kind"] == "low"
+                else (q["price"], p["price"])
+            )
+            if top - bottom < floor:
+                continue
+            offset = right - left - 1
+            if min_low[offset] < bottom or max_high[offset] > top:
+                continue
+            edges[i].append(j)
+
+    best = None
+    best_key = None
+    candidates = 0
+
+    def visit(path):
+        nonlocal best, best_key, candidates
+        if len(path) == 6:
+            turns = [nodes[i][1] for i in path]
+            if impulse_errors(turns):
+                return
+            durations = [
+                (stamps[y] - stamps[x]).total_seconds() / 3600
+                for x, y in pairwise(path)
             ]
-            if len(kinds) != 1:
-                continue  # OHLC cannot order both pivots in a single candle.
-            kind = kinds[0]
-            p = point(row, kind, start["market"])
-            p["timeframe"] = timeframe
-            last = turns[-1]
-            if last["kind"] == kind:
-                if len(turns) > 1 and (
-                    (kind == "high" and p["price"] > last["price"])
-                    or (kind == "low" and p["price"] < last["price"])
-                ):
-                    turns[-1] = p
-            elif abs(p["price"] - last["price"]) >= floor:
-                turns.append(p)
-        if turns[-1]["kind"] == "high":
-            turns[-1] = dict(end)
-        else:
-            turns.append(dict(end))
-        if len(turns) != 6 or impulse_errors(turns, span):
-            continue
-        durations = [
-            (
-                pd.Timestamp(y["timestamp"]) - pd.Timestamp(x["timestamp"])
-            ).total_seconds()
-            / 3600
-            for x, y in pairwise(turns)
-        ]
-        if min(durations) < 12 or max(durations) / min(durations) > 20:
-            continue
-        depths = [
-            (turns[i]["price"] - turns[i + 1]["price"])
-            / (turns[i]["price"] - turns[i - 1]["price"])
-            for i in (1, 3)
-        ]
-        if not all(0.08 <= d <= 0.95 for d in depths):
-            continue
-        candidate = {
-            "status": "PROVEN",
-            "points": turns,
-            "floor": floor,
-            "duration_hours": durations,
-            "retracements": depths,
-        }
-        if best is None or floor > best["floor"]:
-            best = candidate
-    return best or {
-        "status": "UNPROVEN",
-        "reason": "no clean five without micro pivots",
-        "points": [],
-    }
+            ratio = max(durations) / min(durations)
+            depths = [
+                (turns[i]["price"] - turns[i + 1]["price"])
+                / (turns[i]["price"] - turns[i - 1]["price"])
+                for i in (1, 3)
+            ]
+            if ratio > 20 or not all(0.08 <= d <= 0.95 for d in depths):
+                return
+            candidates += 1
+            # Coarsest meaningful five, then coherent durations. No target price
+            # or preferred variant participates in choosing subdivision pivots.
+            minimum_swing = min(
+                abs(y["price"] - x["price"]) for x, y in pairwise(turns)
+            )
+            key = (minimum_swing, -ratio)
+            if best_key is None or key > best_key:
+                best_key = key
+                best = {
+                    "status": "PROVEN",
+                    "points": turns,
+                    "duration_hours": durations,
+                    "retracements": depths,
+                    "minimum_swing": minimum_swing,
+                }
+            return
+        for nxt in edges[path[-1]]:
+            if (nxt == len(nodes) - 1) != (len(path) == 5):
+                continue
+            if len(path) == 2 and nodes[nxt][1]["price"] < start["price"]:
+                continue
+            if len(path) == 3 and nodes[nxt][1]["price"] <= nodes[path[1]][1]["price"]:
+                continue
+            if len(path) == 4 and nodes[nxt][1]["price"] < nodes[path[1]][1]["price"]:
+                continue
+            visit([*path, nxt])
+
+    visit([0])
+    diagnostics["valid_candidates"] = candidates
+    if best is not None:
+        # Keep the independent candle-envelope validator as a final assertion of
+        # the selected path, including origin/overlap wicks inside every leg.
+        if impulse_errors(best["points"], span):
+            return unknown("selected subdivision failed candle-envelope validation")
+        return {**best, **diagnostics}
+    return unknown(
+        "no meaningful five passing chronology, candle extrema, Elliott and degree filters"
+    )
 
 
 def cross_asset_context(

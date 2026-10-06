@@ -1,4 +1,4 @@
-"""Human-readable count audit, shared by Telegram and the attached TXT."""
+"""Human-readable count audit for the attached TXT and walk diagnostics."""
 
 from __future__ import annotations
 
@@ -39,11 +39,31 @@ def major_count_text(state: WaveState) -> str:
         ]
         for variant in ("V2", "V3"):
             score = b.get("scores", {}).get(variant, {})
+            total = score.get("total")
+            score_text = (
+                f"{total}/10 — structural score, not probability"
+                if total is not None
+                else "UNAVAILABLE — subdivision unproven, not a zero score"
+            )
             lines += [
-                f"{variant} SCORE: {score.get('total', 'unavailable')}/10 — structural score, not probability",
+                f"{variant} SCORE: {score_text}",
                 f"{variant} EVIDENCE: {score.get('subdivision', 'unavailable')}",
+                f"{variant} HARD RULES: {score.get('hard_rules', 'UNKNOWN')}",
                 f"{variant} COMPONENTS: {score.get('components', {})}",
             ]
+            if score.get("points"):
+                lines.append(
+                    f"{variant} SUBDIVISION: "
+                    + " → ".join(
+                        f"{_fmt(p['price'])} @ {p['timestamp']} [{p['timeframe']}]"
+                        for p in score["points"]
+                    )
+                )
+            if score.get("search"):
+                search = score["search"]
+                lines.append(
+                    f"{variant} SEARCH: {search.get('method', 'structural pivots')}; {search.get('reason', 'valid structural five')}; candidates={search.get('valid_candidates', 0)}"
+                )
             v = b.get("variants", {}).get(variant, {})
             lines.append(
                 f"{variant} {v.get('target_label', 'TARGETS')} (conditional): "

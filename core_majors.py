@@ -146,6 +146,18 @@ def degree_scores(
             daily,
             cross.get("score", 0.0) if variant == "V3" else 0.0,
         )
+        if variant == "V2":
+            result[variant]["search"] = v2
+            if not proven:
+                # Missing subdivision evidence is not a measured zero, nor a
+                # PASS/FAIL of Elliott rules. Keep the conditional ALT alive.
+                result[variant]["total"] = None
+                result[variant]["components"] = {
+                    key: None for key in result[variant]["components"]
+                }
+                result[variant]["hard_rules"] = "UNKNOWN"
+        elif impulse_errors(points, frame):
+            result[variant]["hard_rules"] = "FAIL"
     return result
 
 
@@ -473,7 +485,10 @@ class MajorWaveEngine:
             book["variants"] = {}
             for v, k in (("V2", "w2"), ("V3", "origin")):
                 book["variants"][v] = {
-                    "hard_status": "INVALID" if v in book["retired"] else "PASS",
+                    "hard_status": "INVALID"
+                    if v in book["retired"]
+                    else book["scores"][v]["hard_rules"],
+                    "subdivision": book["scores"][v]["subdivision"],
                     "strict_origin": a[k]["price"],
                     "targets": []
                     if v in book["retired"]
@@ -534,13 +549,24 @@ class MajorWaveEngine:
             strict_distance_pct=(price / strict - 1) * 100,
             rating=rating,
             liquidity_rank=rank,
-            detector_version="0025",
+            detector_version="0026",
             structure_evidence={"major_count": book, "fib_semantics": SEMANTICS},
             last_complete4h_bucket=book["last_bucket"],
             last_complete4h_close=last_close,
             last_event=INVALID_TEXT if invalid else book["state"],
             updated_at=book["observed_at"],
         )
-        if not invalid and not is_btc_v1 and low > strict:
+        if not invalid and low > strict:
             state.base_zone, state.deep_zone = _zones(low, high, strict)
+            if is_btc_v1:
+                # A W4 retest uses the same execution grid, but its sweep must
+                # stay inside the V1 box. Near the overlap boundary the generic
+                # origin buffer can exceed low: never display it above low.
+                sweep_floor = max(strict, low - 0.05 * (high - low))
+                if strict * 1.0005 < low:
+                    sweep_floor = max(sweep_floor, strict * 1.0005)
+                state.deep_zone = (sweep_floor, low)
+        elif not invalid and is_btc_v1 and low == strict:
+            # Equality is technically valid, but no sweep below low is legal.
+            state.base_zone = (low, fibs["R236"])
         return state
